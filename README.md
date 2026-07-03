@@ -15,6 +15,10 @@ ghealth data heart-rate list --from today --limit 10       # Recent heart rate r
 ghealth schema types                                       # See all available data types
 ```
 
+## Requirements
+
+Download and Install [Go](https://go.dev/doc/install)
+
 ## Installation
 
 ```bash
