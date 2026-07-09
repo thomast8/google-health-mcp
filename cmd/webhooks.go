@@ -48,14 +48,17 @@ subscription binds a user to specific data types under a subscriber.
 Requires the 'cloud-platform' OAuth scope and a configured project ID.
 
 IMPORTANT: a token carrying 'cloud-platform' is REJECTED by the data-plane
-endpoints ("disallowed OAuth scope"), so keep webhook credentials separate
-from your health-data credentials:
+endpoints ("disallowed OAuth scope"), so keep webhook credentials in a
+separate config dir from your health-data credentials. 'auth login' writes
+tokens to the active config dir, so point GHEALTH_CONFIG_DIR at a dedicated
+one for webhooks:
 
-  # health data (default credentials, no cloud-platform)
+  # health data (default config dir)
   ghealth auth login --scopes-preset readonly
 
-  # webhooks (separate credentials file with cloud-platform)
-  export GHEALTH_CREDENTIALS_FILE=~/.config/ghealth/webhooks-creds.json
+  # webhooks (dedicated config dir with its own client_secret and project)
+  export GHEALTH_CONFIG_DIR=~/.config/ghealth-webhooks
+  ghealth setup
   ghealth auth login --scopes cloud-platform
   ghealth webhooks subscribers list
 

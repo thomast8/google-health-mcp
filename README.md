@@ -360,6 +360,22 @@ ghealth webhooks subscribers list        # Manage push-notification subscribers 
 
 `webhooks` (subscribers, subscriptions, `verify`) manages project-level push notifications and requires the `cloud-platform` scope plus a configured project ID — see the skill docs for details.
 
+Because a `cloud-platform` token is rejected by the data-plane endpoints, keep webhook credentials in a **separate config dir** from your health-data credentials. `auth login` always writes tokens to the active config dir, so use a dedicated `GHEALTH_CONFIG_DIR` for webhooks (not `GHEALTH_CREDENTIALS_FILE`, which only changes where tokens are *read* from):
+
+```bash
+export GHEALTH_CONFIG_DIR=~/.config/ghealth-webhooks
+ghealth setup                              # its own client_secret + project
+ghealth auth login --scopes cloud-platform
+ghealth webhooks subscribers list
+```
+
+### Timezones
+
+Date arguments (`--from`/`--to`, `today`, `yesterday`) resolve against exactly one timezone, chosen in this order:
+
+1. the active profile's configured zone — `ghealth config set timezone <IANA zone>`
+2. otherwise, the machine-local timezone
+
 ### Verifying tokens
 
 `ghealth auth status` is a fast local check by default — it reports what's configured without making any network calls, and the `authenticated` field reflects local state only. For env-token / credentials-file modes it is omitted entirely (presence of a token doesn't prove validity).

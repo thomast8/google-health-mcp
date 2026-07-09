@@ -63,6 +63,7 @@ These require judgment that `--help` and `schema` don't provide.
 ghealth user settings get   # → timeZone: "Europe/London", utcOffset: "3600s"
 # Then use --from/--to with the correct local dates
 ```
+This reports the account timezone for information only — to have the CLI resolve dates in that zone, set it explicitly with `ghealth config set timezone <IANA zone>`.
 
 **Sleep/exercise page size is capped at 25 per request** (auto-paginated by CLI):
 ```bash
