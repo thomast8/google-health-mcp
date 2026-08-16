@@ -6,5 +6,6 @@ dist/
 .env
 *.json
 !pkg/schema/bundled_snapshot.json
+!railway.json
 .claude/
 .DS_Store

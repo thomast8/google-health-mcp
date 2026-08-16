@@ -108,11 +108,14 @@ ghealth data <type> <operation> [flags]
 ghealth user <subcommand>
 ghealth schema <subcommand>
 ghealth webhooks <subcommand>
+ghealth mcp [--http]
 ```
 
 `user` subcommands: `identity`, `profile get|update`, `settings get|update`, `irn-profile`, `paired-devices list|get --id <id>`.
 
 `webhooks` subcommands: `subscribers list|create|update|delete`, `subscriptions list|create|update|delete --subscriber <id>`, `verify --url <url>`. **Requires the `cloud-platform` scope** (`ghealth auth login --scopes cloud-platform`) **and a configured project ID.** These are project-level push-notification endpoints; the authenticated identity also needs Health API subscriber IAM permissions on the project.
+
+`mcp` serves the same reads over the Model Context Protocol — stdio by default, Streamable HTTP at `/mcp` with `--http`. It shells out to this CLI, so tool results are identical to the equivalent command's output. The surface is read-only (tools: `list_data_types`, `describe_data_type`, `query_data`, `get_user_info`, `auth_status`, `export_exercise_tcx`), and HTTP mode refuses to start without `GHEALTH_MCP_TOKEN`. Nothing here changes how you use the CLI; reach for it only when wiring up a chat client.
 
 ## Global Flags
 

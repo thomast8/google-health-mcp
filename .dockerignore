@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.agents
+skills
+*_test.go
+ghealth
+Dockerfile
+.dockerignore
+railway.json
+AGENTS.md
+CLAUDE.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+README.md

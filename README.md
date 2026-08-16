@@ -1,9 +1,10 @@
 # ghealth
 
-CLI for the [Google Health API v4](https://developers.google.com/health) — built for AI agents and developers.
+CLI and [MCP server](#mcp-server) for the [Google Health API v4](https://developers.google.com/health) — built for AI agents and developers.
 
 - **40 verified data types**: steps, heart rate, exercise, sleep, weight, SpO2, HRV, ECG, blood glucose, nutrition, and more
 - **Agent-first**: simplified JSON output, deterministic exit codes, `--dry-run`, `--raw`
+- **MCP built in**: `ghealth mcp` for a local client, `ghealth mcp --http` for a remote connector
 - **Single binary**: `go build -o ghealth .`
 
 ## Quick Start
@@ -17,7 +18,7 @@ ghealth schema types                                       # See all available d
 
 ## Requirements
 
-Download and Install [Go](https://go.dev/doc/install)
+Download and Install [Go](https://go.dev/doc/install) 1.25 or later (required by the MCP SDK).
 
 ## Installation
 
@@ -342,6 +343,108 @@ ghealth data <type> list --help   # What flags does this operation take?
 ghealth --dry-run ...             # What HTTP request would this send?
 ```
 
+## MCP Server
+
+`ghealth mcp` serves the same data access over the [Model Context Protocol](https://modelcontextprotocol.io),
+so a chat client can read your health data without a shell. Every tool runs the CLI as a child
+process, so a tool result is byte-for-byte what the equivalent CLI command prints — filters,
+pagination, rollup caps, simplification and `_hints` all behave identically.
+
+The MCP surface is **read-only**. Creating, updating and deleting data stays in the CLI.
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `list_data_types(category?)` | The data types this server can read and the operations each supports. The place to start. |
+| `describe_data_type(data_type)` | Fields, operation parameters, filter template and OAuth scope for one type. |
+| `query_data(data_type, operation, from?, to?, limit?, page_token?, filter?, window_size?, window_days?, id?, detail?, raw?)` | The workhorse. Operations: `list`, `get`, `rollup`, `daily-rollup`, `reconcile`. |
+| `get_user_info(resource)` | `identity`, `profile`, `settings`, `irn-profile` or `paired-devices`. |
+| `auth_status()` | Which credentials are in use, the account, granted scopes and token expiry. |
+| `export_exercise_tcx(id, as?)` | One exercise's track as a trackpoint CSV (default) or raw TCX XML. |
+
+### Local client (stdio)
+
+```bash
+claude mcp add ghealth -- ghealth mcp
+```
+
+Or, for any client that takes a JSON config:
+
+```json
+{
+  "mcpServers": {
+    "ghealth": { "command": "ghealth", "args": ["mcp"] }
+  }
+}
+```
+
+stdio mode uses whatever credentials the CLI already has, so run `ghealth setup` and
+`ghealth auth login` first and check with `ghealth auth status`.
+
+### Remote connector (Streamable HTTP)
+
+`--http` serves the MCP endpoint at `/mcp`, with an unauthenticated `/healthz` for the host's
+probes. Because that endpoint exposes one person's health record, the server **requires a bearer
+token and refuses to start without one**:
+
+```bash
+export GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)
+ghealth mcp --http                       # 0.0.0.0:8000 by default, or $HOST:$PORT
+```
+
+Clients must send `Authorization: Bearer <token>`.
+
+### Deploy
+
+A `Dockerfile` and `railway.json` are included and set `GHEALTH_MCP_HTTP=1` for you. The container
+has no browser and no interactive login, so credentials arrive through the environment:
+`GHEALTH_CLIENT_SECRET_JSON` and `GHEALTH_CREDENTIALS_JSON`, each raw JSON or base64 (base64 avoids
+dashboards mangling multi-line values). The server writes them into the config directory at
+startup, and never overwrites files that already exist.
+
+```bash
+# On a machine that is already authenticated:
+ghealth auth export > /tmp/ghealth-creds.json
+
+# Railway (gives a public HTTPS URL):
+railway init
+railway variables \
+  --set "GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)" \
+  --set "GHEALTH_CLIENT_SECRET_JSON=$(base64 -w0 ~/.config/ghealth/client_secret.json)" \
+  --set "GHEALTH_CREDENTIALS_JSON=$(base64 -w0 /tmp/ghealth-creds.json)"
+railway up                               # then: Settings → Networking → Generate Domain
+
+# Fly.io:  fly launch --dockerfile Dockerfile && fly deploy
+# Any host: docker build -t ghealth-mcp . && docker run -p 8000:8000 \
+#             -e GHEALTH_MCP_TOKEN -e GHEALTH_CLIENT_SECRET_JSON -e GHEALTH_CREDENTIALS_JSON ghealth-mcp
+```
+
+On macOS `base64` has no `-w0`; use `base64 -i <file>` instead.
+
+Your connector URL is `https://<your-domain>/mcp`, with the bearer token as the credential. Confirm
+the deployment is healthy with `curl https://<your-domain>/healthz`, then add it in the apps:
+
+- **Claude** (web/desktop/mobile) — Settings → Connectors → *Add custom connector* → paste the URL
+  and the bearer token. Requires a Pro/Max/Team/Enterprise plan.
+- **ChatGPT** — Settings → Connectors (or Developer mode → MCP) → same URL and token.
+
+**Persist the config directory.** Google can rotate the refresh token, and the CLI writes the new
+one to disk. On an ephemeral container filesystem that rotation is lost on the next deploy, and
+the original token in the environment may no longer be accepted. Attach a Railway volume (or a Fly
+volume) mounted at `/home/ghealth/.config/ghealth` so rotated credentials survive a restart.
+
+### MCP environment variables
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GHEALTH_MCP_HTTP` | `0` | `1` selects Streamable HTTP instead of stdio (same as `--http`). |
+| `GHEALTH_MCP_TOKEN` | — | Bearer token clients must present. **Required** for HTTP mode. |
+| `GHEALTH_MCP_TIMEOUT` | `120s` | Per-tool-call timeout, as a Go duration. |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address for HTTP mode (container hosts set `PORT`). |
+| `GHEALTH_CLIENT_SECRET_JSON` | — | `client_secret.json` contents, raw JSON or base64, written to the config dir at startup. |
+| `GHEALTH_CREDENTIALS_JSON` | — | `ghealth auth export` output, raw JSON or base64, written to the config dir at startup. |
+
 ## Other Commands
 
 ```bash
@@ -356,6 +459,7 @@ ghealth schema endpoints                 # All API endpoints
 ghealth config show                      # Show active configuration (project, scopes, format)
 ghealth config set timezone <IANA zone>  # Set a config value (keys: project_id, format, timezone)
 ghealth webhooks subscribers list        # Manage push-notification subscribers / subscriptions
+ghealth mcp                              # Run the MCP server over stdio (--http for a remote connector)
 ```
 
 `webhooks` (subscribers, subscriptions, `verify`) manages project-level push notifications and requires the `cloud-platform` scope plus a configured project ID — see the skill docs for details.
@@ -410,6 +514,7 @@ Errors are always JSON on stderr and may include a `next_steps: []string` array 
 | `GHEALTH_FORMAT` | Default output format (json/table/csv) |
 | `GHEALTH_BASE_URL` | Override the API base URL |
 
+The MCP server adds [its own variables](#mcp-environment-variables).
 
 ## License
 
