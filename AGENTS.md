@@ -18,6 +18,20 @@ Consequences to respect when changing things:
 - HTTP mode fails closed without `GHEALTH_MCP_TOKEN`. Do not add a way to serve unauthenticated.
 - Renaming a CLI flag or subcommand breaks the MCP layer silently — the argv is only checked at runtime. `pkg/mcpserver`'s tests assert the exact argv, and the end-to-end tests drive the real binary against a stub API; run them after any change to `cmd/`.
 
+## Multi-user mode
+
+Over HTTP the server has two authentication modes, and refuses to start without one. `GHEALTH_MCP_TOKEN` is single-account: every caller reads the server's own Google account. Google sign-in (`pkg/mcpauth`) is multi-user: this server becomes the OAuth 2.1 authorization server the MCP client registers with, and federates to Google behind it. Google cannot fill that role itself — MCP clients need Dynamic Client Registration and resource indicators, and Google supports neither.
+
+Rules that are not negotiable, each with tests that fail if broken:
+
+- **A request with no session gets no data.** `ExecRunner.PerRequestAuth` gives a child process exactly one credential — the caller's — and strips every other source from its environment (`credentialEnv`). It must never fall back to the operator's credentials. See `pkg/mcpserver/tenancy_test.go`.
+- **The consent screen stays.** Every MCP client shares one Google OAuth client, so Google may skip its own consent for a returning user. Ours names the requesting client and its redirect URI; removing it reintroduces the confused-deputy vulnerability the MCP spec calls out.
+- **The client's token is never forwarded upstream.** The MCP access token and the Google token are separate, and inbound tokens are checked against this server's own resource URI.
+- **PKCE S256 only**, exact redirect-URI matching, single-use codes, rotating refresh tokens.
+- **Credentials are stateless.** Client IDs, codes and tokens are AEAD-sealed blobs, sealed under distinct kinds so one can never be replayed as another. That is what removes the need for a database on an ephemeral host; the trade-off is that revocation is by expiry or by rotating `GHEALTH_MCP_SECRET`.
+
+Changing anything in `pkg/mcpauth` warrants a mutation check, not just a green suite: break the rule deliberately and confirm a test catches it.
+
 ## Progressive disclosure
 
 Information is layered so agents load only what they need:
@@ -66,9 +80,13 @@ GHEALTH_MCP_TOKEN=$(openssl rand -hex 32) ghealth mcp --http   # then curl /heal
 | Change CLI flags or help text | `cmd/root.go` (globals), `cmd/data.go` (operations) |
 | OAuth or auth flow | `pkg/auth/auth.go` |
 | Add/change an MCP tool | `pkg/mcpserver/tools.go` |
-| MCP transports, bearer auth, health check | `pkg/mcpserver/server.go` |
+| MCP transports, auth mode wiring, health check | `pkg/mcpserver/server.go` |
+| Per-caller credential isolation | `pkg/mcpserver/exec.go` |
+| OAuth endpoints, consent screen, PKCE | `pkg/mcpauth/provider.go` |
+| Google federation, token cache, replay guard | `pkg/mcpauth/google.go` |
+| Sealed-credential format | `pkg/mcpauth/crypto.go` |
 | MCP command flags and env handling | `cmd/mcp.go` |
-| Headless credential bootstrap | `pkg/mcpserver/bootstrap.go` |
+| Headless credential bootstrap (single-account) | `pkg/mcpserver/bootstrap.go` |
 | Container or Railway deployment | `Dockerfile`, `railway.json` |
 
 ## Documentation to keep updated
@@ -79,6 +97,7 @@ GHEALTH_MCP_TOKEN=$(openssl rand -hex 32) ghealth mcp --http   # then curl /heal
 | Change flags or commands | `README.md`, `skills/ghealth-shared/SKILL.md` |
 | Add/change an MCP tool | `README.md` MCP tools table, the tool's own description string |
 | Add an MCP environment variable | `README.md` MCP environment variables table, `cmd/mcp.go` help text |
+| Change the OAuth flow or its guarantees | `README.md` Security notes, the multi-user rules above |
 
 ## Reference
 

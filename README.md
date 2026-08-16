@@ -382,68 +382,181 @@ Or, for any client that takes a JSON config:
 stdio mode uses whatever credentials the CLI already has, so run `ghealth setup` and
 `ghealth auth login` first and check with `ghealth auth status`.
 
-### Remote connector (Streamable HTTP)
+### Remote server: choosing an authentication mode
 
 `--http` serves the MCP endpoint at `/mcp`, with an unauthenticated `/healthz` for the host's
-probes. Because that endpoint exposes one person's health record, the server **requires a bearer
-token and refuses to start without one**:
+probes. A deployment gets a public HTTPS URL the moment it boots, and that endpoint reads personal
+health records, so **the server refuses to start over HTTP without one of these two modes**.
+
+| | **Google sign-in** | **Shared token** |
+|---|---|---|
+| Who can use it | Anyone with a Google account | Whoever holds the token |
+| Whose data they see | Their own | Yours |
+| Client setup | Automatic (OAuth) | Paste a token |
+| Set up | Google Cloud OAuth client | One env var |
+
+Google sign-in is the mode to pick if anyone other than you will connect. The rest of this section
+covers it; the shared-token mode is [below](#shared-token-single-account).
+
+### Google sign-in (multi-user)
+
+Each user signs in with their own Google account and sees only their own data. The server holds
+their Google refresh token, mints its own short-lived tokens for the MCP client, and never passes
+the client's token upstream.
+
+Google cannot act as the MCP authorization server directly — MCP clients need Dynamic Client
+Registration (RFC 7591) and resource indicators (RFC 8707), and Google supports neither. So this
+server *is* the authorization server the client registers with, and federates to Google behind it:
+
+```
+ChatGPT ──registers──▶ /oauth/register          (RFC 7591, open registration)
+        ──authorize─▶ /oauth/authorize          (PKCE required, S256 only)
+                      └─▶ this server's consent screen
+                          └─▶ Google sign-in ─▶ /oauth/callback
+        ◀──code──────  redirect back to the client
+        ──exchange──▶ /oauth/token              (short-lived access + rotating refresh)
+        ──MCP───────▶ /mcp                      (Authorization: Bearer …)
+```
+
+The consent screen is not decoration. Every MCP client shares this server's single Google OAuth
+client, so Google may have consent already recorded and would wave a returning user straight
+through. That screen names the requesting client and where it will send the user back, which is
+what stops a client the user never chose from silently obtaining a code on their behalf — the
+confused-deputy mitigation the MCP spec requires.
+
+**1. Create a Google OAuth client.** It must be a **Web application** client — the Desktop client
+`ghealth setup` creates cannot receive a server-side redirect.
+
+- Open [Google Cloud credentials](https://console.cloud.google.com/apis/credentials)
+- Enable the [Google Health API](https://console.cloud.google.com/apis/api/health.googleapis.com)
+- *Create credentials → OAuth client ID → Web application*
+- Under **Authorized redirect URIs** add `https://<your-domain>/oauth/callback` — exactly, no
+  trailing slash. The server prints this URI on startup, so you can copy it from the logs.
+- On the OAuth consent screen, add the Health read scopes your users need
+
+**2. Deploy.** `Dockerfile` and `railway.json` are included and set `GHEALTH_MCP_HTTP=1`.
+
+```bash
+railway init
+railway variables \
+  --set "GHEALTH_MCP_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com" \
+  --set "GHEALTH_MCP_GOOGLE_CLIENT_SECRET=<client-secret>" \
+  --set "GHEALTH_MCP_SECRET=$(openssl rand -hex 32)"
+railway up                    # then: Settings → Networking → Generate Domain
+railway variables --set "GHEALTH_MCP_PUBLIC_URL=https://<your-domain>"
+```
+
+`GHEALTH_MCP_SECRET` seals every credential the server issues. **Keep it stable** — changing it
+signs everyone out, which is also how you revoke access in a hurry. `GHEALTH_MCP_PUBLIC_URL` is set
+after the domain exists; without it the server derives its URLs from forwarded headers, which works
+but is worth pinning. On Railway, `RAILWAY_PUBLIC_DOMAIN` is used as a fallback.
+
+No database and no volume are needed in this mode: client IDs, authorization codes and tokens are
+all self-contained encrypted blobs, so the server keeps working across redeploys.
+
+Verify the deployment before wiring up a client:
+
+```bash
+curl https://<your-domain>/healthz
+curl https://<your-domain>/.well-known/oauth-protected-resource
+```
+
+**3. Before other people can use it: Google verification.** Health scopes are *sensitive*, so
+Google gates them. While your OAuth app's publishing status is **Testing**, only accounts you add
+as test users can sign in, and there is a hard cap of 100 users. Going to **Production** requires
+submitting the app for [sensitive scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification);
+until it is approved, users see an "unverified app" warning and the cap still applies. This is a
+Google review process measured in weeks, not a configuration switch. Plan for it if "anyone" means
+more than a hundred people you know.
+
+### Shared token (single account)
+
+Every caller presenting the token reads the one Google account the server itself is authenticated
+as. Suitable for a private deployment; not for sharing.
 
 ```bash
 export GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)
-ghealth mcp --http                       # 0.0.0.0:8000 by default, or $HOST:$PORT
+ghealth mcp --http
 ```
 
-Clients must send `Authorization: Bearer <token>`.
-
-### Deploy
-
-A `Dockerfile` and `railway.json` are included and set `GHEALTH_MCP_HTTP=1` for you. The container
-has no browser and no interactive login, so credentials arrive through the environment:
-`GHEALTH_CLIENT_SECRET_JSON` and `GHEALTH_CREDENTIALS_JSON`, each raw JSON or base64 (base64 avoids
-dashboards mangling multi-line values). The server writes them into the config directory at
-startup, and never overwrites files that already exist.
+Credentials reach the container through the environment, since it has no browser and no
+interactive login: `GHEALTH_CLIENT_SECRET_JSON` and `GHEALTH_CREDENTIALS_JSON`, each raw JSON or
+base64. The server writes them into the config directory at startup and never overwrites files that
+already exist.
 
 ```bash
-# On a machine that is already authenticated:
 ghealth auth export > /tmp/ghealth-creds.json
-
-# Railway (gives a public HTTPS URL):
-railway init
 railway variables \
   --set "GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)" \
   --set "GHEALTH_CLIENT_SECRET_JSON=$(base64 -w0 ~/.config/ghealth/client_secret.json)" \
   --set "GHEALTH_CREDENTIALS_JSON=$(base64 -w0 /tmp/ghealth-creds.json)"
-railway up                               # then: Settings → Networking → Generate Domain
-
-# Fly.io:  fly launch --dockerfile Dockerfile && fly deploy
-# Any host: docker build -t ghealth-mcp . && docker run -p 8000:8000 \
-#             -e GHEALTH_MCP_TOKEN -e GHEALTH_CLIENT_SECRET_JSON -e GHEALTH_CREDENTIALS_JSON ghealth-mcp
 ```
 
-On macOS `base64` has no `-w0`; use `base64 -i <file>` instead.
+On macOS `base64` has no `-w0`; use `base64 -i <file>`.
 
-Your connector URL is `https://<your-domain>/mcp`, with the bearer token as the credential. Confirm
-the deployment is healthy with `curl https://<your-domain>/healthz`, then add it in the apps:
+**Attach a volume at `/home/ghealth/.config/ghealth`** in this mode. Google can rotate the refresh
+token and the CLI writes the new one to disk; on an ephemeral filesystem that rotation is lost on
+redeploy and the original may stop working. Google sign-in mode does not need this — it holds no
+credentials on disk.
 
-- **Claude** (web/desktop/mobile) — Settings → Connectors → *Add custom connector* → paste the URL
-  and the bearer token. Requires a Pro/Max/Team/Enterprise plan.
-- **ChatGPT** — Settings → Connectors (or Developer mode → MCP) → same URL and token.
+### Add it in ChatGPT
 
-**Persist the config directory.** Google can rotate the refresh token, and the CLI writes the new
-one to disk. On an ephemeral container filesystem that rotation is lost on the next deploy, and
-the original token in the environment may no longer be accepted. Attach a Railway volume (or a Fly
-volume) mounted at `/home/ghealth/.config/ghealth` so rotated credentials survive a restart.
+Requires a Pro, Plus, Business, Enterprise or Education plan; on a business or enterprise account
+you need to be an admin.
+
+1. Profile picture → **Settings** → **Connectors**
+2. Scroll to **Advanced settings** and enable **Developer mode**
+3. Back in **Connectors**, click **Create**
+4. Set the MCP server URL to `https://<your-domain>/mcp`
+5. Choose **OAuth** for authentication and save
+
+ChatGPT registers itself, then sends you through Google sign-in. Approve this server's consent
+screen, sign in at Google, and the connector goes live. Ask *"what were my daily steps last week?"*
+to confirm it works, or call `auth_status` to see which Google account you are connected as.
+
+If you are still in Testing status, add the Google account you sign in with as a test user first,
+or Google will refuse the sign-in.
+
+In shared-token mode instead, pick the API-key / bearer-token option and paste the token.
+
+### Add it in Claude
+
+Settings → Connectors → *Add custom connector* → `https://<your-domain>/mcp`. Claude discovers the
+OAuth endpoints the same way. Requires a Pro/Max/Team/Enterprise plan.
 
 ### MCP environment variables
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `GHEALTH_MCP_HTTP` | `0` | `1` selects Streamable HTTP instead of stdio (same as `--http`). |
-| `GHEALTH_MCP_TOKEN` | — | Bearer token clients must present. **Required** for HTTP mode. |
-| `GHEALTH_MCP_TIMEOUT` | `120s` | Per-tool-call timeout, as a Go duration. |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address for HTTP mode (container hosts set `PORT`). |
-| `GHEALTH_CLIENT_SECRET_JSON` | — | `client_secret.json` contents, raw JSON or base64, written to the config dir at startup. |
-| `GHEALTH_CREDENTIALS_JSON` | — | `ghealth auth export` output, raw JSON or base64, written to the config dir at startup. |
+| `GHEALTH_MCP_TIMEOUT` | `120s` | Per-tool-call timeout, as a Go duration. |
+| **Google sign-in** | | |
+| `GHEALTH_MCP_GOOGLE_CLIENT_ID` | — | Web OAuth client ID. |
+| `GHEALTH_MCP_GOOGLE_CLIENT_SECRET` | — | Web OAuth client secret. |
+| `GHEALTH_MCP_SECRET` | — | Seals issued credentials; min 32 chars. Changing it signs everyone out. |
+| `GHEALTH_MCP_PUBLIC_URL` | derived | Public origin, e.g. `https://ghealth.up.railway.app`. |
+| **Shared token** | | |
+| `GHEALTH_MCP_TOKEN` | — | Bearer token granting access to the server's own account. |
+| `GHEALTH_CLIENT_SECRET_JSON` | — | `client_secret.json` contents, raw JSON or base64. |
+| `GHEALTH_CREDENTIALS_JSON` | — | `ghealth auth export` output, raw JSON or base64. |
+
+Setting the Google variables enables multi-user mode and takes precedence over
+`GHEALTH_MCP_TOKEN`. Setting only some of them is an error rather than a silent fallback.
+
+### Security notes
+
+- **Read-only.** No tool can create, update or delete health data.
+- **Tokens are never passed through.** The MCP client's token and the user's Google token are
+  separate; the server exchanges one for the other and validates that a token was issued for it.
+- **Per-request isolation.** Each tool call runs the CLI as a child process holding exactly one
+  credential — the caller's. Every other credential source is stripped from that process's
+  environment, so a request without a session fails rather than falling back to the operator's own.
+- **PKCE (S256) is mandatory**, authorization codes are single-use and expire in two minutes, and
+  refresh tokens rotate on every use.
+- **Revocation.** Users can disconnect at
+  [myaccount.google.com/permissions](https://myaccount.google.com/permissions). Rotating
+  `GHEALTH_MCP_SECRET` invalidates every outstanding token at once.
 
 ## Other Commands
 

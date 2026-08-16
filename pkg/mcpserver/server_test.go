@@ -31,9 +31,9 @@ const testToken = "s3cr3t-token"
 // boots, so starting without a token would publish the user's health record.
 func TestHandlerRefusesToServeWithoutAToken(t *testing.T) {
 	for _, token := range []string{"", "   "} {
-		h, err := Handler(New(Options{Runner: &recordingRunner{}}), token)
-		if !errors.Is(err, ErrNoToken) {
-			t.Errorf("token %q: got (%v, %v), want ErrNoToken", token, h, err)
+		h, err := Handler(New(Options{Runner: &recordingRunner{}}), HTTPOptions{Token: token})
+		if !errors.Is(err, ErrNoAuth) {
+			t.Errorf("token %q: got (%v, %v), want ErrNoAuth", token, h, err)
 		}
 		if h != nil {
 			t.Errorf("token %q: a handler was returned despite the error", token)
@@ -103,7 +103,7 @@ func TestHealthEndpointIsUnauthenticated(t *testing.T) {
 
 func newTestHTTPServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	handler, err := Handler(New(Options{Runner: &recordingRunner{}, Version: "test"}), testToken)
+	handler, err := Handler(New(Options{Runner: &recordingRunner{}, Version: "test"}), HTTPOptions{Token: testToken})
 	if err != nil {
 		t.Fatalf("Handler: %v", err)
 	}

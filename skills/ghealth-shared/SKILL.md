@@ -115,7 +115,7 @@ ghealth mcp [--http]
 
 `webhooks` subcommands: `subscribers list|create|update|delete`, `subscriptions list|create|update|delete --subscriber <id>`, `verify --url <url>`. **Requires the `cloud-platform` scope** (`ghealth auth login --scopes cloud-platform`) **and a configured project ID.** These are project-level push-notification endpoints; the authenticated identity also needs Health API subscriber IAM permissions on the project.
 
-`mcp` serves the same reads over the Model Context Protocol — stdio by default, Streamable HTTP at `/mcp` with `--http`. It shells out to this CLI, so tool results are identical to the equivalent command's output. The surface is read-only (tools: `list_data_types`, `describe_data_type`, `query_data`, `get_user_info`, `auth_status`, `export_exercise_tcx`), and HTTP mode refuses to start without `GHEALTH_MCP_TOKEN`. Nothing here changes how you use the CLI; reach for it only when wiring up a chat client.
+`mcp` serves the same reads over the Model Context Protocol — stdio by default, Streamable HTTP at `/mcp` with `--http`. It shells out to this CLI, so tool results are identical to the equivalent command's output. The surface is read-only (tools: `list_data_types`, `describe_data_type`, `query_data`, `get_user_info`, `auth_status`, `export_exercise_tcx`). HTTP mode requires either Google sign-in (multi-user: `GHEALTH_MCP_GOOGLE_CLIENT_ID`, `GHEALTH_MCP_GOOGLE_CLIENT_SECRET`, `GHEALTH_MCP_SECRET`) or a shared `GHEALTH_MCP_TOKEN` for single-account access, and refuses to start without one. Nothing here changes how you use the CLI; reach for it only when wiring up a chat client.
 
 ## Global Flags
 

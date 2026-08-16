@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"ghealth/pkg/mcpauth"
 	"ghealth/pkg/types"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -349,8 +350,32 @@ func authStatus(r Runner) mcp.ToolHandlerFor[authStatusInput, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(out)
+		return textResult(withConnectedAccount(ctx, out))
 	}
+}
+
+// withConnectedAccount names the signed-in Google account in the auth_status
+// result. When several people share a deployment, "which account am I seeing?"
+// is the question this tool exists to answer, and the CLI cannot answer it — it
+// only ever sees the access token the server injected.
+//
+// The CLI's own output is left untouched if it cannot be parsed; a cosmetic
+// addition must not be able to break the tool.
+func withConnectedAccount(ctx context.Context, out []byte) []byte {
+	session, ok := mcpauth.SessionFromContext(ctx)
+	if !ok || session.Email == "" {
+		return out
+	}
+	var status map[string]any
+	if err := json.Unmarshal(out, &status); err != nil {
+		return out
+	}
+	status["connected_google_account"] = session.Email
+	merged, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return out
+	}
+	return append(merged, '\n')
 }
 
 // ─── export_exercise_tcx ─────────────────────────────────────────

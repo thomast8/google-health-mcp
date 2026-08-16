@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"ghealth/pkg/mcpauth"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -38,8 +40,8 @@ const HealthPath = "/healthz"
 // its schema if needed, then query — and reach for daily-rollup rather than
 // adding up a list.
 const Instructions = `Personal health data from the Google Health API: steps, heart rate, sleep,
-exercise, weight, SpO2, HRV, ECG, blood glucose, nutrition and more, for the single account this
-server is authenticated as.
+exercise, weight, SpO2, HRV, ECG, blood glucose, nutrition and more, for the Google account this
+connection is signed in as.
 
 Start with list_data_types to find the type ID for a question, then query_data to read it. Use
 describe_data_type when you need the fields or parameters of a type you have not used before.
@@ -93,19 +95,31 @@ func ServeStdio(ctx context.Context, s *mcp.Server) error {
 	return s.Run(ctx, &mcp.StdioTransport{})
 }
 
-// ErrNoToken is returned when HTTP mode is requested without a bearer token.
+// ErrNoAuth is returned when HTTP mode is requested with no way to authenticate
+// callers.
 //
-// The server exposes one person's health record, so it fails closed rather than
+// The server exposes personal health records, so it fails closed rather than
 // starting an unauthenticated listener: a Railway or Fly deployment gets a
 // public HTTPS URL the moment it boots, and an unguarded /mcp there is an open
-// door to that record.
-var ErrNoToken = errors.New("refusing to serve MCP over HTTP without a bearer token: set GHEALTH_MCP_TOKEN to a long random secret")
+// door to those records.
+var ErrNoAuth = errors.New("refusing to serve MCP over HTTP without authentication: configure Google sign-in, or set GHEALTH_MCP_TOKEN for single-account access")
 
-// Handler builds the HTTP handler: the MCP endpoint behind bearer auth, plus an
-// unauthenticated health check for the container host's probes.
-func Handler(s *mcp.Server, token string) (http.Handler, error) {
-	if strings.TrimSpace(token) == "" {
-		return nil, ErrNoToken
+// HTTPOptions selects how callers authenticate. Exactly one mode applies.
+type HTTPOptions struct {
+	// OAuth serves multiple users, each signing in with their own Google
+	// account. Takes precedence over Token when both are set.
+	OAuth *mcpauth.Provider
+	// Token is a shared secret granting access to the one Google account the
+	// server itself is authenticated as.
+	Token string
+}
+
+// Handler builds the HTTP handler: the MCP endpoint behind authentication, the
+// OAuth endpoints when Google sign-in is enabled, and an unauthenticated health
+// check for the container host's probes.
+func Handler(s *mcp.Server, opts HTTPOptions) (http.Handler, error) {
+	if opts.OAuth == nil && strings.TrimSpace(opts.Token) == "" {
+		return nil, ErrNoAuth
 	}
 
 	streamable := mcp.NewStreamableHTTPHandler(
@@ -116,16 +130,30 @@ func Handler(s *mcp.Server, token string) (http.Handler, error) {
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle(MCPPath, requireBearer(token, streamable))
-	mux.Handle(MCPPath+"/", requireBearer(token, streamable))
+
+	var guard func(http.Handler) http.Handler
+	if opts.OAuth != nil {
+		opts.OAuth.Register(mux)
+		guard = opts.OAuth.Middleware
+	} else {
+		guard = func(next http.Handler) http.Handler { return requireBearer(opts.Token, next) }
+	}
+	mux.Handle(MCPPath, guard(streamable))
+	mux.Handle(MCPPath+"/", guard(streamable))
+
 	mux.HandleFunc(HealthPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
 
-	// Reject cross-site browser requests. The bearer token already prevents a
-	// drive-by call from succeeding, but this refuses them before they reach
-	// the MCP machinery at all.
+	// Reject cross-site browser requests. This guards unsafe methods only, so
+	// the OAuth browser flow is unaffected — /oauth/authorize and the Google
+	// callback are cross-site GET navigations, which are always allowed.
+	//
+	// It matters most for /oauth/consent. That form is what stands between a
+	// user and a client they never chose, and it is submitted from this
+	// server's own page; a POST auto-submitted by an attacker's page arrives
+	// marked cross-site and is refused here.
 	return http.NewCrossOriginProtection().Handler(mux), nil
 }
 

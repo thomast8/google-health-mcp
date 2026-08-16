@@ -27,6 +27,7 @@ import (
 	"ghealth/internal/version"
 	"ghealth/pkg/client"
 	"ghealth/pkg/config"
+	"ghealth/pkg/mcpauth"
 	"ghealth/pkg/mcpserver"
 
 	"github.com/spf13/cobra"
@@ -39,6 +40,13 @@ const (
 	envMCPTimeout = "GHEALTH_MCP_TIMEOUT"
 	envHost       = "HOST"
 	envPort       = "PORT"
+
+	// Google sign-in (multi-user mode).
+	envMCPSecret          = "GHEALTH_MCP_SECRET"
+	envGoogleClientID     = "GHEALTH_MCP_GOOGLE_CLIENT_ID"
+	envGoogleClientSecret = "GHEALTH_MCP_GOOGLE_CLIENT_SECRET"
+	envPublicURL          = "GHEALTH_MCP_PUBLIC_URL"
+	envRailwayDomain      = "RAILWAY_PUBLIC_DOMAIN"
 )
 
 const (
@@ -58,19 +66,27 @@ var mcpCmd = &cobra.Command{
 
 Transports:
   stdio (default)  For a local client such as Claude Desktop or Claude Code, which
-                   launches this process and speaks JSON-RPC over stdin/stdout.
+                   launches this process and speaks JSON-RPC over stdin/stdout. It
+                   uses the credentials the CLI already has.
   --http           Streamable HTTP for a remote client, served at /mcp with a
-                   /healthz probe alongside it. Requires GHEALTH_MCP_TOKEN; the
-                   client must send it as 'Authorization: Bearer <token>'.
+                   /healthz probe alongside it.
 
 Tools: list_data_types, describe_data_type, query_data, get_user_info, auth_status,
 export_exercise_tcx. Writes are not exposed — use the data subcommands for those.
 
-Authentication is the CLI's: stored credentials from 'ghealth auth login', or the
-GHEALTH_ACCESS_TOKEN / GHEALTH_CREDENTIALS_FILE environment variables. On a host with
-no interactive login, set GHEALTH_CLIENT_SECRET_JSON and GHEALTH_CREDENTIALS_JSON
-(each raw JSON or base64) and the server writes them into the config directory at
-startup.
+HTTP authentication — one of two modes, and the server will not start without one:
+
+  Google sign-in (multi-user). Set GHEALTH_MCP_GOOGLE_CLIENT_ID,
+  GHEALTH_MCP_GOOGLE_CLIENT_SECRET and GHEALTH_MCP_SECRET. Each user signs in with
+  their own Google account and sees only their own data. This server then acts as
+  the OAuth authorization server the MCP client registers with, so clients such as
+  ChatGPT and Claude can connect with no shared secret. Also set
+  GHEALTH_MCP_PUBLIC_URL to the deployment's public origin, and register
+  <public-url>/oauth/callback as an authorized redirect URI on the Google client.
+
+  Shared token (single account). Set GHEALTH_MCP_TOKEN. Every caller presenting it
+  reads the one account this server is authenticated as, using the CLI's own
+  credentials. Suitable for a private deployment, not for sharing.
 
 Examples:
   ghealth mcp                          # stdio, for a local client
@@ -108,23 +124,44 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		return client.NewValidationError(err.Error(), "Use a Go duration such as 60s or 3m")
 	}
 
-	srv := mcpserver.New(mcpserver.Options{
-		Runner:  &mcpserver.ExecRunner{Timeout: timeout},
-		Version: version.Full(),
-	})
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// stdio serves whoever launched the process, using the credentials the CLI
+	// already has. There is no second party to authenticate.
 	if !mcpHTTP && !envEnabled(envMCPHTTP) {
 		logf("ghealth mcp: serving over stdio (config dir: %s)", config.ConfigDir())
-		return mcpserver.ServeStdio(ctx, srv)
+		return mcpserver.ServeStdio(ctx, mcpserver.New(mcpserver.Options{
+			Runner:  &mcpserver.ExecRunner{Timeout: timeout},
+			Version: version.Full(),
+		}))
 	}
 
-	handler, err := mcpserver.Handler(srv, os.Getenv(envMCPToken))
+	opts, err := httpAuthOptions(logf)
+	if err != nil {
+		return err
+	}
+
+	runner := &mcpserver.ExecRunner{Timeout: timeout}
+	if opts.OAuth != nil {
+		// Multi-user: each call runs as the caller, and child processes get an
+		// empty config directory so there are no stored credentials to fall
+		// back to if a request somehow arrives without a session.
+		empty, err := os.MkdirTemp("", "ghealth-mcp-tenant")
+		if err != nil {
+			return client.NewConfigError(fmt.Sprintf("cannot create the isolation directory: %v", err), "")
+		}
+		defer os.RemoveAll(empty)
+		runner.PerRequestAuth = true
+		runner.ConfigDir = empty
+	}
+
+	srv := mcpserver.New(mcpserver.Options{Runner: runner, Version: version.Full()})
+	handler, err := mcpserver.Handler(srv, opts)
 	if err != nil {
 		return client.NewConfigError(err.Error(),
-			"Generate one with 'openssl rand -hex 32' and set it on both the server and the client")
+			"For Google sign-in set "+envGoogleClientID+", "+envGoogleClientSecret+" and "+envMCPSecret+
+				"; for single-account access set "+envMCPToken)
 	}
 
 	addr := resolveAddr()
@@ -134,6 +171,78 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	}
 	logf("ghealth mcp: shut down")
 	return nil
+}
+
+// httpAuthOptions decides how callers authenticate.
+//
+// Google sign-in wins when it is configured, because it is the mode that serves
+// more than one person; the shared token remains for a private, single-account
+// deployment. Configuring neither is an error rather than a default, and a
+// half-configured Google client is reported rather than silently ignored — a
+// deployment that quietly fell back to a shared token would expose the
+// operator's own health record to everyone holding it.
+func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
+	clientID := strings.TrimSpace(os.Getenv(envGoogleClientID))
+	clientSecret := strings.TrimSpace(os.Getenv(envGoogleClientSecret))
+	secret := strings.TrimSpace(os.Getenv(envMCPSecret))
+	token := strings.TrimSpace(os.Getenv(envMCPToken))
+
+	if clientID == "" && clientSecret == "" && secret == "" {
+		if token == "" {
+			return mcpserver.HTTPOptions{}, nil // Handler reports the failure.
+		}
+		logf("ghealth mcp: single-account mode — every caller presenting the shared token sees this server's own health data")
+		return mcpserver.HTTPOptions{Token: token}, nil
+	}
+
+	var missing []string
+	for _, v := range []struct{ name, value string }{
+		{envGoogleClientID, clientID},
+		{envGoogleClientSecret, clientSecret},
+		{envMCPSecret, secret},
+	} {
+		if v.value == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return mcpserver.HTTPOptions{}, client.NewConfigError(
+			"Google sign-in is partly configured; missing: "+strings.Join(missing, ", "),
+			"Set all three, or unset them all to fall back to "+envMCPToken)
+	}
+
+	provider, err := mcpauth.NewProvider(mcpauth.Config{
+		Secret:    secret,
+		PublicURL: publicURL(),
+		MCPPath:   mcpserver.MCPPath,
+		Google: mcpauth.GoogleConfig{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+		},
+	})
+	if err != nil {
+		return mcpserver.HTTPOptions{}, client.NewConfigError(err.Error(), "")
+	}
+
+	if url := publicURL(); url != "" {
+		logf("ghealth mcp: Google sign-in enabled — connector URL %s%s, redirect URI %s%s",
+			url, mcpserver.MCPPath, url, mcpauth.CallbackPath)
+	} else {
+		logf("ghealth mcp: Google sign-in enabled — set %s so the OAuth URLs do not depend on forwarded headers", envPublicURL)
+	}
+	return mcpserver.HTTPOptions{OAuth: provider}, nil
+}
+
+// publicURL is the externally reachable origin. Railway supplies the domain but
+// not the scheme, so it is completed here.
+func publicURL() string {
+	if explicit := strings.TrimSpace(os.Getenv(envPublicURL)); explicit != "" {
+		return strings.TrimRight(explicit, "/")
+	}
+	if domain := strings.TrimSpace(os.Getenv(envRailwayDomain)); domain != "" {
+		return "https://" + domain
+	}
+	return ""
 }
 
 // resolveAddr picks the listen address: the --addr flag, else $HOST:$PORT as

@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"ghealth/pkg/client"
+	"ghealth/pkg/mcpauth"
 )
 
 // DefaultTimeout bounds one CLI invocation. List operations auto-paginate, so
@@ -62,6 +63,75 @@ type ExecRunner struct {
 	Binary string
 	// Timeout bounds a single invocation. Zero means DefaultTimeout.
 	Timeout time.Duration
+	// PerRequestAuth makes each invocation run as the authenticated caller,
+	// using the Google access token attached to the request's context.
+	//
+	// This is what separates tenants. With it set, a child process is given
+	// exactly one credential — the caller's — and every other source the CLI
+	// would otherwise consult is stripped from its environment, so a request
+	// that somehow arrives without a session fails instead of falling back to
+	// whatever credentials the server itself holds.
+	PerRequestAuth bool
+	// ConfigDir overrides GHEALTH_CONFIG_DIR for child processes. Under
+	// PerRequestAuth this should be an empty directory, so there are no stored
+	// credentials for a child to find.
+	ConfigDir string
+}
+
+// credentialEnv lists the variables that can hand a child process an identity.
+// Under PerRequestAuth every one of them is removed before the caller's own
+// token is added, so precedence cannot be argued about: there is only ever one
+// credential in the environment.
+var credentialEnv = []string{
+	"GHEALTH_ACCESS_TOKEN",
+	"GHEALTH_CREDENTIALS_FILE",
+	"GHEALTH_CONFIG_DIR",
+	"GHEALTH_PROFILE",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	// Server-only secrets. A child has no use for them, and the narrower the
+	// child's environment, the less a subprocess bug can disclose.
+	"GHEALTH_CLIENT_SECRET_JSON",
+	"GHEALTH_CREDENTIALS_JSON",
+	"GHEALTH_MCP_TOKEN",
+	"GHEALTH_MCP_SECRET",
+	"GHEALTH_MCP_GOOGLE_CLIENT_ID",
+	"GHEALTH_MCP_GOOGLE_CLIENT_SECRET",
+}
+
+// childEnv builds the environment for one invocation, or nil to inherit the
+// server's own (single-user mode, where the CLI's normal credential resolution
+// is exactly what is wanted).
+func (r *ExecRunner) childEnv(ctx context.Context) ([]string, error) {
+	if !r.PerRequestAuth {
+		return nil, nil
+	}
+	token, err := mcpauth.ResolveGoogleToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("not connected to a Google account: %w", err)
+	}
+	env := stripEnv(os.Environ(), credentialEnv)
+	env = append(env, "GHEALTH_ACCESS_TOKEN="+token)
+	if r.ConfigDir != "" {
+		env = append(env, "GHEALTH_CONFIG_DIR="+r.ConfigDir)
+	}
+	return env, nil
+}
+
+// stripEnv removes the named variables from an environment slice.
+func stripEnv(env []string, names []string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && drop[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // Run executes `ghealth <args...>` and returns its stdout.
@@ -79,6 +149,11 @@ func (r *ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 		bin = self
 	}
 
+	env, err := r.childEnv(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -88,13 +163,14 @@ func (r *ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = env
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	// Killing the child on timeout does not close the output pipe if it left a
 	// descendant holding the write end; without a WaitDelay, Run would block
 	// until that descendant exited and the deadline would mean nothing.
 	cmd.WaitDelay = killGrace
-	err := cmd.Run()
+	err = cmd.Run()
 
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):

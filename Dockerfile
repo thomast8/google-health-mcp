@@ -39,6 +39,10 @@ ENV GHEALTH_MCP_HTTP=1 \
 EXPOSE 8000
 
 # GHEALTH_MCP_HTTP=1 selects the Streamable HTTP transport, binding HOST:PORT and serving the MCP
-# endpoint at /mcp with a health check at /healthz. The server refuses to start without
-# GHEALTH_MCP_TOKEN — it exposes one person's health record, so it will not listen unauthenticated.
+# endpoint at /mcp with a health check at /healthz.
+#
+# The server will not listen unauthenticated. Configure one of:
+#   Google sign-in (multi-user) — GHEALTH_MCP_GOOGLE_CLIENT_ID, GHEALTH_MCP_GOOGLE_CLIENT_SECRET,
+#     GHEALTH_MCP_SECRET, and GHEALTH_MCP_PUBLIC_URL once the domain exists.
+#   Shared token (single account) — GHEALTH_MCP_TOKEN.
 CMD ["ghealth", "mcp"]
