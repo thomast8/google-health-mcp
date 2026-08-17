@@ -184,3 +184,67 @@ func TestHTTPAuthOptionsSelectsMode(t *testing.T) {
 		}
 	})
 }
+
+// Google rejects an authorization request outright if one scope in it is
+// unavailable to the project, so trimming the list has to be possible from
+// configuration alone.
+func TestGoogleScopes(t *testing.T) {
+	t.Run("unset means the defaults", func(t *testing.T) {
+		t.Setenv(envGoogleScopes, "")
+		got, err := googleScopes()
+		if err != nil {
+			t.Fatalf("googleScopes: %v", err)
+		}
+		if got != nil {
+			t.Errorf("got %v, want nil so the provider defaults apply", got)
+		}
+	})
+
+	t.Run("bare suffixes are expanded", func(t *testing.T) {
+		t.Setenv(envGoogleScopes, "sleep.readonly, activity_and_fitness.readonly")
+		got, err := googleScopes()
+		if err != nil {
+			t.Fatalf("googleScopes: %v", err)
+		}
+		want := []string{
+			"openid", "email",
+			"https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+			"https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+		}
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("got %v\nwant %v", got, want)
+		}
+	})
+
+	t.Run("full URLs pass through and duplicates collapse", func(t *testing.T) {
+		full := "https://www.googleapis.com/auth/googlehealth.sleep.readonly"
+		t.Setenv(envGoogleScopes, full+" sleep.readonly")
+		got, err := googleScopes()
+		if err != nil {
+			t.Fatalf("googleScopes: %v", err)
+		}
+		if len(got) != 3 {
+			t.Errorf("got %v, want openid, email and one health scope", got)
+		}
+	})
+
+	// The account address identifies a session in auth_status, so these two are
+	// not the caller's to drop.
+	t.Run("openid and email are always present", func(t *testing.T) {
+		t.Setenv(envGoogleScopes, "sleep.readonly")
+		got, err := googleScopes()
+		if err != nil {
+			t.Fatalf("googleScopes: %v", err)
+		}
+		if got[0] != "openid" || got[1] != "email" {
+			t.Errorf("got %v", got)
+		}
+	})
+
+	t.Run("a list with no health scopes is an error", func(t *testing.T) {
+		t.Setenv(envGoogleScopes, "openid, email, ,")
+		if _, err := googleScopes(); err == nil {
+			t.Error("an empty health scope list was accepted")
+		}
+	})
+}

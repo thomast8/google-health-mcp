@@ -557,9 +557,39 @@ curl https://<your-domain>/healthz          # → {"status":"ok"}
 - *Create credentials → OAuth client ID → Web application*
 - Under **Authorized redirect URIs** add `https://<your-domain>/oauth/callback` — the domain from
   step 1, exactly, with no trailing slash
-- On the OAuth consent screen, add the Health read scopes your users need
+- On the consent screen (*Google Auth Platform*, or *APIs & Services → OAuth consent screen* in
+  older console layouts): set **Audience** to External, add yourself under **Test users**, and add
+  the scopes below under **Data access**
 
 Copy the client ID and client secret.
+
+The server requests these by default — `openid` and `email` to name the account, and read-only
+access to each health category:
+
+```
+openid
+email
+https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly
+https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly
+https://www.googleapis.com/auth/googlehealth.sleep.readonly
+https://www.googleapis.com/auth/googlehealth.nutrition.readonly
+https://www.googleapis.com/auth/googlehealth.profile.readonly
+https://www.googleapis.com/auth/googlehealth.settings.readonly
+https://www.googleapis.com/auth/googlehealth.location.readonly
+https://www.googleapis.com/auth/googlehealth.ecg.readonly
+https://www.googleapis.com/auth/googlehealth.irn.readonly
+```
+
+Google rejects an authorization request outright if **any one** of the scopes in it is unavailable
+to the project, and `ecg` and `irn` are the ones a project is least likely to be granted. If sign-in
+fails with `invalid_scope`, narrow the request with `GHEALTH_MCP_SCOPES` rather than editing the
+code — bare suffixes are expanded, so this is short enough to type on a phone:
+
+```
+GHEALTH_MCP_SCOPES=activity_and_fitness.readonly,sleep.readonly,health_metrics_and_measurements.readonly
+```
+
+`openid` and `email` are always included whatever you list.
 
 **3. Switch on Google sign-in.**
 
@@ -673,6 +703,7 @@ OAuth endpoints the same way. Requires a Pro/Max/Team/Enterprise plan.
 | `GHEALTH_MCP_GOOGLE_CLIENT_ID` | — | Web OAuth client ID. |
 | `GHEALTH_MCP_GOOGLE_CLIENT_SECRET` | — | Web OAuth client secret. |
 | `GHEALTH_MCP_SECRET` | — | Seals issued credentials; min 32 chars. Changing it signs everyone out. |
+| `GHEALTH_MCP_SCOPES` | all read scopes | Comma- or space-separated Google scopes to request. Bare suffixes such as `sleep.readonly` are expanded. Use it to drop a scope the project is not granted. |
 | `GHEALTH_MCP_PUBLIC_URL` | derived | Public origin, e.g. `https://ghealth.up.railway.app`. Optional on Railway, which supplies `RAILWAY_PUBLIC_DOMAIN`. |
 | **Shared token** | | |
 | `GHEALTH_MCP_TOKEN` | — | Bearer token granting access to the server's own account. |

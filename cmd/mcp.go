@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"ghealth/internal/version"
+	"ghealth/pkg/auth"
 	"ghealth/pkg/client"
 	"ghealth/pkg/config"
 	"ghealth/pkg/mcpauth"
@@ -47,6 +48,7 @@ const (
 	envMCPSecret          = "GHEALTH_MCP_SECRET"
 	envGoogleClientID     = "GHEALTH_MCP_GOOGLE_CLIENT_ID"
 	envGoogleClientSecret = "GHEALTH_MCP_GOOGLE_CLIENT_SECRET"
+	envGoogleScopes       = "GHEALTH_MCP_SCOPES"
 	envPublicURL          = "GHEALTH_MCP_PUBLIC_URL"
 	envRailwayDomain      = "RAILWAY_PUBLIC_DOMAIN"
 )
@@ -219,6 +221,15 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		return mcpserver.HTTPOptions{}, err
 	}
 
+	scopes, err := googleScopes()
+	if err != nil {
+		return mcpserver.HTTPOptions{}, client.NewValidationError(err.Error(),
+			"List the scope suffixes you need, e.g. "+envGoogleScopes+"=sleep.readonly,activity_and_fitness.readonly")
+	}
+	if scopes != nil {
+		logf("ghealth mcp: requesting %d Google scopes from %s", len(scopes), envGoogleScopes)
+	}
+
 	provider, err := mcpauth.NewProvider(mcpauth.Config{
 		Secret:    secret,
 		PublicURL: publicURL(),
@@ -226,6 +237,7 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		Google: mcpauth.GoogleConfig{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
+			Scopes:       scopes,
 		},
 	})
 	if err != nil {
@@ -239,6 +251,49 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		logf("ghealth mcp: Google sign-in enabled — set %s so the OAuth URLs do not depend on forwarded headers", envPublicURL)
 	}
 	return mcpserver.HTTPOptions{OAuth: provider}, nil
+}
+
+// googleScopes parses GHEALTH_MCP_SCOPES, returning nil to mean "use the
+// defaults".
+//
+// This override exists because Google rejects an authorization request wholesale
+// if any single scope in it is unavailable to the project — one restricted scope
+// makes sign-in fail with invalid_scope, and the default set includes narrow ones
+// (ecg, irn) that not every project is granted. Without a way to trim the list
+// from configuration, the only remedy would be editing and redeploying the
+// server.
+//
+// Bare suffixes are accepted so the value stays short enough to type on a phone:
+// "sleep.readonly" means the full googlehealth.sleep.readonly URL. openid and
+// email are always added, since the account's address is what identifies a
+// session in auth_status.
+func googleScopes() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv(envGoogleScopes))
+	if raw == "" {
+		return nil, nil
+	}
+
+	seen := map[string]bool{}
+	scopes := []string{"openid", "email"}
+	for _, name := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "openid" || name == "email" {
+			continue
+		}
+		full := auth.FullScope(name)
+		if seen[full] {
+			continue
+		}
+		seen[full] = true
+		scopes = append(scopes, full)
+	}
+
+	if len(scopes) == 2 {
+		return nil, fmt.Errorf("%s lists no health scopes", envGoogleScopes)
+	}
+	return scopes, nil
 }
 
 // suggestSecretSteps returns a recovery checklist carrying a freshly generated
