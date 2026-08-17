@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -80,9 +82,10 @@ HTTP authentication — one of two modes, and the server will not start without 
   GHEALTH_MCP_GOOGLE_CLIENT_SECRET and GHEALTH_MCP_SECRET. Each user signs in with
   their own Google account and sees only their own data. This server then acts as
   the OAuth authorization server the MCP client registers with, so clients such as
-  ChatGPT and Claude can connect with no shared secret. Also set
-  GHEALTH_MCP_PUBLIC_URL to the deployment's public origin, and register
-  <public-url>/oauth/callback as an authorized redirect URI on the Google client.
+  ChatGPT and Claude can connect with no shared secret. Register
+  <public-url>/oauth/callback as an authorized redirect URI on the Google client;
+  the exact URI is logged on startup. Set GHEALTH_MCP_PUBLIC_URL to the public
+  origin if the host does not provide RAILWAY_PUBLIC_DOMAIN.
 
   Shared token (single account). Set GHEALTH_MCP_TOKEN. Every caller presenting it
   reads the one account this server is authenticated as, using the CLI's own
@@ -161,7 +164,8 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return client.NewConfigError(err.Error(),
 			"For Google sign-in set "+envGoogleClientID+", "+envGoogleClientSecret+" and "+envMCPSecret+
-				"; for single-account access set "+envMCPToken)
+				"; for single-account access set "+envMCPToken).
+			WithNextSteps(suggestSecretSteps(envMCPSecret))
 	}
 
 	addr := resolveAddr()
@@ -206,9 +210,13 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		}
 	}
 	if len(missing) > 0 {
-		return mcpserver.HTTPOptions{}, client.NewConfigError(
+		err := client.NewConfigError(
 			"Google sign-in is partly configured; missing: "+strings.Join(missing, ", "),
 			"Set all three, or unset them all to fall back to "+envMCPToken)
+		if secret == "" {
+			err = err.WithNextSteps(suggestSecretSteps(envMCPSecret))
+		}
+		return mcpserver.HTTPOptions{}, err
 	}
 
 	provider, err := mcpauth.NewProvider(mcpauth.Config{
@@ -231,6 +239,40 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		logf("ghealth mcp: Google sign-in enabled — set %s so the OAuth URLs do not depend on forwarded headers", envPublicURL)
 	}
 	return mcpserver.HTTPOptions{OAuth: provider}, nil
+}
+
+// suggestSecretSteps returns a recovery checklist carrying a freshly generated
+// secret, ready to paste into the host's variable editor.
+//
+// This exists because the operator may have no shell to run 'openssl rand' in —
+// a phone and a hosting dashboard is a normal way to deploy this. The obvious
+// alternative, a random-string website, hands the key that seals every issued
+// token to a third party, so the server offers a locally generated one instead.
+//
+// The value is a suggestion only: the server still fails closed and never runs
+// on a secret it invented, because a secret that changed on each restart would
+// sign every user out on each deploy. It reaches the logs, which is the same
+// trust boundary as the variable it is destined for.
+func suggestSecretSteps(name string) []string {
+	steps := []string{
+		"Generate a secret: openssl rand -hex 32",
+		"Set it as " + name + " in your host's environment variables",
+		"Keep it stable — changing it signs every user out",
+	}
+	if generated, err := randomHex(32); err == nil {
+		steps = append(steps,
+			"No shell handy? Copy this freshly generated value instead: "+generated)
+	}
+	return steps
+}
+
+// randomHex returns n cryptographically random bytes as a hex string.
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // publicURL is the externally reachable origin. Railway supplies the domain but

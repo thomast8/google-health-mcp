@@ -488,12 +488,17 @@ because `railway.json` names it explicitly, so there is nothing to configure abo
 
 **Variables.** *Service → Variables → New Variable*, one per row.
 
-**Generating the secrets.** `GHEALTH_MCP_SECRET` needs at least 32 characters, which is longer than
-the strong passwords iOS suggests by default. Use a password manager with the length set to 48, or
-paste two generated passwords together. Do not use a random-string website — it has seen your
-secret. If you want a real shell on the phone,
+**Generating the secret without a shell.** Deploy with no `GHEALTH_MCP_SECRET` set and read the
+logs: the startup error carries a freshly generated one to copy into *Variables*. The server never
+runs on a secret it invented — it still fails closed — so this is a suggestion you pin, not a
+default. Do not use a random-string website; it has then seen the key that seals every token the
+server issues. If you would rather have a real shell on the phone,
 [Cloud Shell](https://shell.cloud.google.com) runs in mobile Safari and gives you
 `openssl rand -hex 32`.
+
+**Skip `GHEALTH_MCP_PUBLIC_URL` on Railway.** Railway injects `RAILWAY_PUBLIC_DOMAIN` once a domain
+exists and the server completes it into an origin itself, so there is one less URL to type
+correctly.
 
 **Checking it works.** Open the URLs in the browser instead of using `curl` — `/healthz` and
 `/.well-known/oauth-authorization-server` both return JSON that renders fine.
@@ -547,9 +552,12 @@ Copy the client ID and client secret.
 railway variables \
   --set "GHEALTH_MCP_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com" \
   --set "GHEALTH_MCP_GOOGLE_CLIENT_SECRET=<client-secret>" \
-  --set "GHEALTH_MCP_SECRET=$(openssl rand -hex 32)" \
-  --set "GHEALTH_MCP_PUBLIC_URL=https://<your-domain>"
+  --set "GHEALTH_MCP_SECRET=$(openssl rand -hex 32)"
 ```
+
+On Railway you can leave `GHEALTH_MCP_PUBLIC_URL` unset: `RAILWAY_PUBLIC_DOMAIN` is injected once a
+domain exists and the server completes it into an origin. Set it explicitly on hosts that provide no
+equivalent, or when serving from a custom domain that Railway does not know about.
 
 Then drop the temporary token — `railway variable delete GHEALTH_MCP_TOKEN`, or remove it under
 *Variables* in the dashboard. Google sign-in takes precedence over the shared token, so it stops
@@ -650,7 +658,7 @@ OAuth endpoints the same way. Requires a Pro/Max/Team/Enterprise plan.
 | `GHEALTH_MCP_GOOGLE_CLIENT_ID` | — | Web OAuth client ID. |
 | `GHEALTH_MCP_GOOGLE_CLIENT_SECRET` | — | Web OAuth client secret. |
 | `GHEALTH_MCP_SECRET` | — | Seals issued credentials; min 32 chars. Changing it signs everyone out. |
-| `GHEALTH_MCP_PUBLIC_URL` | derived | Public origin, e.g. `https://ghealth.up.railway.app`. |
+| `GHEALTH_MCP_PUBLIC_URL` | derived | Public origin, e.g. `https://ghealth.up.railway.app`. Optional on Railway, which supplies `RAILWAY_PUBLIC_DOMAIN`. |
 | **Shared token** | | |
 | `GHEALTH_MCP_TOKEN` | — | Bearer token granting access to the server's own account. |
 | `GHEALTH_CLIENT_SECRET_JSON` | — | `client_secret.json` contents, raw JSON or base64. |
