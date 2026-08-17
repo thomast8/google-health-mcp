@@ -473,6 +473,40 @@ gcloud services enable health.googleapis.com
 
 </details>
 
+<details>
+<summary><strong>No terminal at all? The whole setup works from a phone.</strong></summary>
+
+Every step has a web UI, so none of the CLI below is required. Deploying from GitHub is arguably
+the better route anyway — it redeploys on every push.
+
+**Deploy.** In the [Railway dashboard](https://railway.com/new): *New Project → Deploy from GitHub
+repo*, authorise GitHub, pick the repo. If the code is on a branch rather than the default one, set
+it under *Service → Settings → Source → Branch* and redeploy. Railway builds the `Dockerfile`
+because `railway.json` names it explicitly, so there is nothing to configure about the build.
+
+**Domain.** *Service → Settings → Networking → Generate Domain*.
+
+**Variables.** *Service → Variables → New Variable*, one per row.
+
+**Generating the secrets.** `GHEALTH_MCP_SECRET` needs at least 32 characters, which is longer than
+the strong passwords iOS suggests by default. Use a password manager with the length set to 48, or
+paste two generated passwords together. Do not use a random-string website — it has seen your
+secret. If you want a real shell on the phone,
+[Cloud Shell](https://shell.cloud.google.com) runs in mobile Safari and gives you
+`openssl rand -hex 32`.
+
+**Checking it works.** Open the URLs in the browser instead of using `curl` — `/healthz` and
+`/.well-known/oauth-authorization-server` both return JSON that renders fine.
+
+**Google Cloud Console** works in mobile Safari, but the credentials screens are cramped; use
+*Request Desktop Website* from the address-bar menu.
+
+**ChatGPT must be set up on the web, not in the app** — the iOS app cannot create custom
+connectors. Open `chatgpt.com` in Safari, request the desktop site, and add the connector there.
+Once it exists it works in the iOS app on the same account.
+
+</details>
+
 **1. Deploy and get a domain.** `Dockerfile` and `railway.json` are included and set
 `GHEALTH_MCP_HTTP=1`.
 
@@ -579,12 +613,15 @@ credentials on disk.
 
 ### Add it in ChatGPT
 
-Requires a Pro, Plus, Business, Enterprise or Education plan; on a business or enterprise account
-you need to be an admin.
+Requires a Pro, Plus, Business, Enterprise or Education plan. **Do this in the web app** — the
+mobile apps cannot create custom connectors, though they can use one once it exists. On a Business
+or Enterprise workspace an admin may first have to allow it under *Workspace Settings → Permissions
+& Roles → Connected Data → Create custom MCP connectors*.
 
-1. Profile picture → **Settings** → **Connectors**
+1. Profile picture → **Settings** → **Apps** (labelled **Connectors** in some accounts; OpenAI has
+   been renaming it)
 2. Scroll to **Advanced settings** and enable **Developer mode**
-3. Back in **Connectors**, click **Create**
+3. Back in **Apps**/**Connectors**, click **Create**
 4. Set the MCP server URL to `https://<your-domain>/mcp`
 5. Choose **OAuth** for authentication and save
 
