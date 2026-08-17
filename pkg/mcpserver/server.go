@@ -36,26 +36,61 @@ const MCPPath = "/mcp"
 const HealthPath = "/healthz"
 
 // Instructions tells the client what this server is for and how to approach it.
-// It mirrors the CLI's progressive-disclosure design: discover the type, read
-// its schema if needed, then query — and reach for daily-rollup rather than
-// adding up a list.
-const Instructions = `Personal health data from the Google Health API: steps, heart rate, sleep,
-exercise, weight, SpO2, HRV, ECG, blood glucose, nutrition and more, for the Google account this
-connection is signed in as.
+//
+// It mirrors the CLI's progressive-disclosure design — discover the type, read
+// its schema if needed, then query — and front-loads the handful of things an
+// agent cannot work out from the tool schemas alone, because getting them wrong
+// produces an answer that looks right: aggregating over UTC instead of the
+// user's local days, reading a missing day as a zero, or mistaking a
+// limit-capped page for a whole range.
+const Instructions = `This server reads one person's health record from the Google Health API:
+steps, distance, active minutes and exercise sessions; sleep with its stages; heart rate, HRV,
+SpO2, ECG and blood pressure; weight, body fat and other body measurements; nutrition and
+hydration. 40 data types in all, for the Google account this connection is signed in as.
 
-Start with list_data_types to find the type ID for a question, then query_data to read it. Use
-describe_data_type when you need the fields or parameters of a type you have not used before.
+# How to answer a question
 
-For daily totals and averages use the daily-rollup operation rather than listing points and
-summing them yourself — the API aggregates in the user's local days, which a naive sum over UTC
-timestamps gets wrong. Rollup ranges are capped by the API (14 days for heart-rate, total-calories,
-active-minutes and calories-in-heart-rate-zone; 90 days for everything else), so split longer
-questions into several calls.
+1. list_data_types — find the type ID. IDs are hyphenated and not always guessable, and this
+   costs no API call.
+2. describe_data_type — only when you need the type's fields, units or filter template.
+3. query_data — the read itself.
 
-Responses are simplified JSON. A '_hints' array, when present, suggests the next call. A
-'nextPageToken' means more data is available — pass it back as page_token to continue.
+auth_status and get_user_info are for context, not for measurements: whose account this is, what
+scopes were granted, the user's height and age, which devices are paired.
 
-This server is read-only: it cannot create, update or delete health data.`
+# Choosing the operation
+
+daily-rollup for totals and averages per day, list for individual timestamped readings, rollup for
+fixed windows other than a day, get for one point by id, reconcile for what changed since a sync.
+
+Reach for daily-rollup before summing a list yourself. It aggregates in the user's local days;
+adding up points by their UTC timestamps quietly misattributes everything either side of midnight,
+and it returns one row per day where a list of a sampled type returns thousands.
+
+# Things that mislead
+
+- Missing days are absent, not zero. A day with no recorded steps has no row at all. Never read an
+  absent day as a zero, and never average across days the record does not contain.
+- An empty dataPoints array is a real answer. It means nothing was recorded in that range — not
+  that the request was malformed.
+- Rollup ranges are capped by the API: 14 days for heart-rate, total-calories, active-minutes and
+  calories-in-heart-rate-zone, 90 days for everything else. Split a longer question into several
+  calls rather than widening the range.
+- A nextPageToken means the result is partial. Pass it back as page_token, with every other
+  argument unchanged, before drawing a conclusion from what you have.
+- Timestamps carry the user's UTC offset (2026-08-17T07:12:04+01:00). Report times as the user
+  experienced them; do not convert to UTC in your answer.
+
+# Responses
+
+Simplified JSON in one stable envelope: a dataPoints array, plus nextPageToken when more data is
+available and _hints when the server has a next step worth suggesting. Measurements come back as
+JSON numbers, named as the Health API names them — rollup and daily-rollup suffix each field with
+the aggregation applied, so a step count becomes countSum and a heart rate becomes
+beatsPerMinuteAvg alongside beatsPerMinuteMin and beatsPerMinuteMax.
+
+This server is read-only: it cannot create, update or delete health data. This is a medical
+record, not a metrics dashboard — report what it says, and leave diagnosis to a clinician.`
 
 // Options configures a server instance.
 type Options struct {

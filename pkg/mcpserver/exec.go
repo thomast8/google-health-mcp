@@ -18,11 +18,17 @@
 // The CLI is invoked as a child process rather than called in-process, which
 // keeps one behaviour to maintain instead of two: filter construction,
 // pagination, rollup range caps, response simplification, the _hints layer and
-// the structured error envelope all stay in cmd/ and pkg/output, and an MCP
-// tool returns byte-for-byte what the equivalent CLI command prints. It is also
-// what makes concurrent tool calls safe — the cobra tree keeps its flag state in
-// package-level variables and writes to os.Stdout, neither of which survives
-// being shared between simultaneous requests.
+// the structured error envelope all stay in cmd/ and pkg/output, and a tool
+// result's text block is byte-for-byte what the equivalent CLI command prints.
+// It is also what makes concurrent tool calls safe — the cobra tree keeps its
+// flag state in package-level variables and writes to os.Stdout, neither of
+// which survives being shared between simultaneous requests.
+//
+// Two things do differ from a shell invocation, both because the reader does.
+// A JSON result also travels as structuredContent, validated against the tool's
+// declared output schema (schemas.go), and children are marked with
+// GHEALTH_SURFACE=mcp so their _hints name tool calls rather than command lines
+// no MCP client can run.
 package mcpserver
 
 import (
@@ -38,6 +44,7 @@ import (
 
 	"ghealth/pkg/client"
 	"ghealth/pkg/mcpauth"
+	"ghealth/pkg/output"
 )
 
 // DefaultTimeout bounds one CLI invocation. List operations auto-paginate, so
@@ -98,19 +105,26 @@ var credentialEnv = []string{
 	"GHEALTH_MCP_GOOGLE_CLIENT_SECRET",
 }
 
-// childEnv builds the environment for one invocation, or nil to inherit the
-// server's own (single-user mode, where the CLI's normal credential resolution
-// is exactly what is wanted).
+// surfaceMCP marks a child process as producing output for an MCP client, so
+// the hints it generates name tool calls rather than command lines the client
+// has no shell to run. It is set on every invocation, in both auth modes.
+const surfaceMCP = output.SurfaceEnv + "=mcp"
+
+// childEnv builds the environment for one invocation.
+//
+// Single-account mode inherits the server's own environment, where the CLI's
+// normal credential resolution is exactly what is wanted. Multi-user mode
+// replaces it with one holding a single credential — the caller's.
 func (r *ExecRunner) childEnv(ctx context.Context) ([]string, error) {
 	if !r.PerRequestAuth {
-		return nil, nil
+		return append(stripEnv(os.Environ(), []string{output.SurfaceEnv}), surfaceMCP), nil
 	}
 	token, err := mcpauth.ResolveGoogleToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("not connected to a Google account: %w", err)
 	}
-	env := stripEnv(os.Environ(), credentialEnv)
-	env = append(env, "GHEALTH_ACCESS_TOKEN="+token)
+	env := stripEnv(os.Environ(), append(append([]string{}, credentialEnv...), output.SurfaceEnv))
+	env = append(env, "GHEALTH_ACCESS_TOKEN="+token, surfaceMCP)
 	if r.ConfigDir != "" {
 		env = append(env, "GHEALTH_CONFIG_DIR="+r.ConfigDir)
 	}

@@ -282,7 +282,7 @@ ghealth data exercise delete --ids 7649353586249326520
 
 ## Output
 
-Responses are **simplified by default** — redundant timestamps, empty fields, and repeated metadata are stripped. Timestamps include the user's UTC offset (e.g., `+01:00`).
+Responses are **simplified by default** — redundant timestamps, empty fields, and repeated metadata are stripped. Timestamps include the user's UTC offset (e.g., `+01:00`), and measurements come back as JSON numbers even where the API quotes them (see [Numbers](#numbers)).
 
 ```bash
 ghealth data heart-rate list --from today --limit 2
@@ -290,8 +290,8 @@ ghealth data heart-rate list --from today --limit 2
 ```json
 {
   "dataPoints": [
-    {"time": "2026-03-29T16:33:07+01:00", "beatsPerMinute": "80", "source": "Google Pixel Watch 4 (41mm)"},
-    {"time": "2026-03-29T16:33:04+01:00", "beatsPerMinute": "80", "source": "Google Pixel Watch 4 (41mm)"}
+    {"time": "2026-03-29T16:33:07+01:00", "beatsPerMinute": 80, "source": "Google Pixel Watch 4 (41mm)"},
+    {"time": "2026-03-29T16:33:04+01:00", "beatsPerMinute": 80, "source": "Google Pixel Watch 4 (41mm)"}
   ]
 }
 ```
@@ -302,9 +302,9 @@ ghealth data steps daily-rollup --from 2026-03-26 --to 2026-03-29
 ```json
 {
   "dataPoints": [
-    {"date": "2026-03-28", "countSum": "9037"},
-    {"date": "2026-03-27", "countSum": "2408"},
-    {"date": "2026-03-26", "countSum": "6474"}
+    {"date": "2026-03-28", "countSum": 9037},
+    {"date": "2026-03-27", "countSum": 2408},
+    {"date": "2026-03-26", "countSum": 6474}
   ]
 }
 ```
@@ -316,6 +316,20 @@ ghealth data steps daily-rollup --from 2026-03-26 --to 2026-03-29
 | `--format csv` | CSV output (nested objects flatten to dot-separated columns) |
 | `-o, --output <file>` | Write data to the file; print only a column schema + 3-row preview to stdout. Prefer this over `> file` (which gives the file but no schema) |
 | `--dry-run` | Show the HTTP request without executing |
+
+### Numbers
+
+The Health API serializes every `int64` field as a quoted string, so it sends a step total as
+`"countSum": "9037"` and a heart rate as `"beatsPerMinute": "80"`. Simplified output converts those
+to real JSON numbers, so a consumer never has to know which quoted values are secretly numeric
+before it can compare, sum or plot them.
+
+The conversion is conservative in two ways. A string becomes a number only if formatting that
+number reproduces the original text exactly — `"007"`, `"1.50"` and any integer too large for a
+float64 stay strings rather than silently changing. And identifier-shaped fields (`id`, `name`,
+anything ending in `Id`, `Name` or `Token`) are never converted, since an all-digit id still has to
+be sent back verbatim. `--raw` output is untouched: it is the original API response, string-typed
+integers included.
 
 In `--format csv` and `--format table`, the data stream stays pure: `_hints` and a leftover `nextPageToken` are written to **stderr** rather than mixed into the rows, and an empty result emits an empty CSV (never a JSON object). Use `-o <file>` and the stderr signals together to page through a large export without polluting the CSV.
 
@@ -347,21 +361,38 @@ ghealth --dry-run ...             # What HTTP request would this send?
 
 `ghealth mcp` serves the same data access over the [Model Context Protocol](https://modelcontextprotocol.io),
 so a chat client can read your health data without a shell. Every tool runs the CLI as a child
-process, so a tool result is byte-for-byte what the equivalent CLI command prints — filters,
-pagination, rollup caps, simplification and `_hints` all behave identically.
+process, so a tool result's text is byte-for-byte what the equivalent CLI command prints — filters,
+pagination, rollup caps and simplification all behave identically.
 
 The MCP surface is **read-only**. Creating, updating and deleting data stays in the CLI.
 
 ### Tools
 
-| Tool | What it does |
-|------|--------------|
-| `list_data_types(category?)` | The data types this server can read and the operations each supports. The place to start. |
-| `describe_data_type(data_type)` | Fields, operation parameters, filter template and OAuth scope for one type. |
-| `query_data(data_type, operation, from?, to?, limit?, page_token?, filter?, window_size?, window_days?, id?, detail?, raw?)` | The workhorse. Operations: `list`, `get`, `rollup`, `daily-rollup`, `reconcile`. |
-| `get_user_info(resource)` | `identity`, `profile`, `settings`, `irn-profile` or `paired-devices`. |
-| `auth_status()` | Which credentials are in use, the account, granted scopes and token expiry. |
-| `export_exercise_tcx(id, as?)` | One exercise's track as a trackpoint CSV (default) or raw TCX XML. |
+Every tool that answers in JSON declares an **output schema**, so a client sees the shape of an
+answer in `tools/list` before spending a call to find out. Results carry that shape as
+`structuredContent` alongside the text block. `export_exercise_tcx` has no output schema: it returns
+CSV rows or TCX XML, not JSON.
+
+| Tool | What it does | Output schema |
+|------|--------------|---------------|
+| `list_data_types(category?)` | The data types this server can read and the operations each supports. The place to start. | ✅ |
+| `describe_data_type(data_type)` | Fields, operation parameters, filter template and OAuth scope for one type. | ✅ |
+| `query_data(data_type, operation, from?, to?, limit?, page_token?, filter?, window_size?, window_days?, id?, detail?, raw?)` | The workhorse. Operations: `list`, `get`, `rollup`, `daily-rollup`, `reconcile`. | ✅ |
+| `get_user_info(resource)` | `identity`, `profile`, `settings`, `irn-profile` or `paired-devices`. | ✅ |
+| `auth_status()` | Which credentials are in use, the account, granted scopes and token expiry. | ✅ |
+| `export_exercise_tcx(id, as?)` | One exercise's track as a trackpoint CSV (default) or raw TCX XML. | — (text) |
+
+`_hints` behave identically too, but they are *phrased* for whoever is reading. A hint has to name
+a step the reader can take, and an MCP client has no shell — so the same suggestion arrives as a
+command line on the CLI and as a tool call over MCP:
+
+```
+CLI  hint: For detailed per-interval data, 'ghealth data steps list --from today --to today' shows individual records.
+MCP  hint: For detailed per-interval records, call query_data with data_type 'steps', operation 'list', from 'today', to 'today'.
+```
+
+The MCP server sets `GHEALTH_SURFACE=mcp` on the CLI children it runs; nothing else sets it, so
+shell users always get command lines.
 
 ### Local client (stdio)
 
@@ -815,6 +846,7 @@ Errors are always JSON on stderr and may include a `next_steps: []string` array 
 | `GHEALTH_PROFILE` | Active profile name |
 | `GHEALTH_FORMAT` | Default output format (json/table/csv) |
 | `GHEALTH_BASE_URL` | Override the API base URL |
+| `GHEALTH_SURFACE` | Set to `mcp` to phrase `_hints` as MCP tool calls instead of command lines. The MCP server sets it on the CLI children it runs; you should not need to |
 
 The MCP server adds [its own variables](#mcp-environment-variables).
 

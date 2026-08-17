@@ -352,6 +352,20 @@ type dataListOpts struct {
 	sleepDetail bool
 }
 
+// hintRequest describes this call to the hint layer. The surface comes from the
+// environment: the MCP server marks the CLI children it runs, so their hints
+// name tool calls instead of command lines the client cannot run.
+func hintRequest(opts dataListOpts) output.HintRequest {
+	return output.HintRequest{
+		DataType:  opts.dataType,
+		Operation: opts.operation,
+		From:      opts.from,
+		To:        opts.to,
+		Detail:    opts.sleepDetail,
+		Surface:   output.SurfaceFromEnv(),
+	}
+}
+
 // listPageCap bounds auto-pagination as a safety net against a server that
 // never stops returning a nextPageToken. Reaching it does not silently
 // truncate: executeDataList surfaces the continuation token and a warning so
@@ -495,12 +509,9 @@ func executeDataList(req *client.Request, opts dataListOpts) error {
 	// Generate and inject hints — but never into --raw output, which is
 	// documented as the original API response with nothing added.
 	if !flagRaw {
-		hints := output.GenerateHints(simplified, opts.dataType, opts.operation, totalLimit, opts.from, opts.to, opts.sleepDetail)
+		hints := output.GenerateHints(simplified, hintRequest(opts))
 		if truncated {
-			hints = append(hints, fmt.Sprintf(
-				"returned %d rows = --limit; more data exists — fetch the next page with --page-token %s, "+
-					"or raise --limit / narrow --from/--to",
-				totalLimit, remainingToken))
+			hints = append(hints, output.TruncationHint(output.SurfaceFromEnv(), totalLimit, remainingToken))
 		}
 		simplified = output.InjectHints(simplified, hints)
 		simplified = output.EnsureEnvelope(simplified)
@@ -533,7 +544,11 @@ func executeDataGet(req *client.Request, opts dataListOpts) error {
 	}
 
 	if !flagRaw {
-		hints := output.GenerateHints(simplified, opts.dataType, opts.operation, 0, "", "", opts.sleepDetail)
+		// A get names one point by id, so the range-shaped hints have nothing
+		// to say about it.
+		hr := hintRequest(opts)
+		hr.From, hr.To = "", ""
+		hints := output.GenerateHints(simplified, hr)
 		simplified = output.InjectHints(simplified, hints)
 		simplified = output.EnsureEnvelope(simplified)
 	}
@@ -583,7 +598,7 @@ func executeDataRollup(req *client.Request, opts dataListOpts) error {
 	simplified := output.SimplifyResponse(body, opts.dataType, flagRaw)
 
 	if !flagRaw {
-		hints := output.GenerateHints(body, opts.dataType, opts.operation, 0, opts.from, opts.to, opts.sleepDetail)
+		hints := output.GenerateHints(body, hintRequest(opts))
 		simplified = output.InjectHints(simplified, hints)
 		simplified = output.EnsureEnvelope(simplified)
 	}

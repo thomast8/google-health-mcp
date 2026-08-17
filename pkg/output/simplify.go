@@ -183,7 +183,7 @@ func simplifyDataPoint(dp map[string]interface{}, dataType string) map[string]in
 		case "interval", "sampleTime", "date", "createTime", "updateTime":
 			continue
 		default:
-			result[k] = v
+			result[k] = numeric(k, v)
 		}
 	}
 
@@ -335,12 +335,139 @@ func simplifyRollupPoint(rp map[string]interface{}) map[string]interface{} {
 	if typeKey != "" {
 		if typeData, ok := rp[typeKey].(map[string]interface{}); ok {
 			for k, v := range typeData {
-				result[k] = v
+				result[k] = numeric(k, v)
 			}
 		}
 	}
 
 	return result
+}
+
+// numeric turns a measurement the API carries in a string into a real JSON
+// number, recursing through nested objects and arrays.
+//
+// The Health API serializes every int64 field as a JSON string (protobuf's JSON
+// mapping), so a step total arrives as "countSum": "1332" and a heart rate as
+// "beatsPerMinute": "80". A consumer then has to know which quoted values are
+// measurements and coerce them before it can compare, sum or plot them — and an
+// agent reading one response has no way to tell "80" the number from "RUN" the
+// enum. Emitting numbers as numbers moves that knowledge here, once.
+//
+// Two guards keep the conversion from ever losing or inventing information:
+//
+//   - The value must round-trip. A string becomes a number only if formatting
+//     that number reproduces the original text exactly, so "007", "1.50" and
+//     any int64 too large for a float64 stay strings rather than silently
+//     changing.
+//   - Identifier-shaped keys are left alone. A numeric id is not a measurement,
+//     and turning it into a number would break the get call it is meant to feed.
+func numeric(key string, v interface{}) interface{} {
+	switch val := v.(type) {
+	case string:
+		if isIdentifierKey(key) {
+			return v
+		}
+		if n, ok := asNumber(val); ok {
+			return n
+		}
+		return v
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(val))
+		for k, nested := range val {
+			out[k] = numeric(k, nested)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, elem := range val {
+			// Array elements inherit the key their array hangs from, so
+			// voltageSamples: ["1", "2"] converts and ids: ["1"] does not.
+			out[i] = numeric(key, elem)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// asNumber parses a JSON number literal that reproduces itself when formatted
+// back, returning the typed value and whether the conversion is safe.
+func asNumber(s string) (interface{}, bool) {
+	if s == "" {
+		return nil, false
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && strconv.FormatInt(n, 10) == s {
+		return n, true
+	}
+	// Reject the spellings JSON has no number for but Go's parser accepts
+	// ("NaN", "Inf", "0x1p-2", "1_000", "+1") before trusting ParseFloat.
+	if !isJSONNumber(s) {
+		return nil, false
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil && strconv.FormatFloat(f, 'g', -1, 64) == s {
+		return f, true
+	}
+	return nil, false
+}
+
+// isJSONNumber reports whether s is spelled exactly as JSON's number grammar
+// allows: an optional minus, an integer part with no redundant leading zero, an
+// optional fraction, and an optional exponent.
+func isJSONNumber(s string) bool {
+	i := 0
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	// Integer part: "0", or a non-zero digit followed by digits.
+	start := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == start || (i-start > 1 && s[start] == '0') {
+		return false
+	}
+	// Fraction.
+	if i < len(s) && s[i] == '.' {
+		i++
+		start = i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	// Exponent.
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		start = i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	return i == len(s)
+}
+
+// isIdentifierKey reports whether a field name holds a reference rather than a
+// measurement. Health API identifiers are opaque strings that sometimes happen
+// to be all digits, and a caller has to send them back verbatim.
+func isIdentifierKey(key string) bool {
+	switch key {
+	case "id", "name", "uid", "guid":
+		return true
+	}
+	for _, suffix := range []string{"Id", "ID", "Ids", "IDs", "Name", "Names", "Token", "Uid", "UID"} {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // formatTimeWithOffset converts a UTC timestamp + offset into a local ISO 8601 string.

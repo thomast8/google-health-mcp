@@ -312,3 +312,114 @@ func TestEndToEndServerAdvertisesInstructionsAndTools(t *testing.T) {
 		t.Errorf("advertised %d tools, want 6: %v", len(names), names)
 	}
 }
+
+// A hint is only useful if the reader can act on it. Over MCP that means naming
+// a tool and its arguments — the client has no shell to run a ghealth command
+// line in. The whole chain has to cooperate: the server marks its children, the
+// CLI reads the mark, and the hint comes back phrased for a tool caller.
+func TestEndToEndHintsAreWrittenForAToolCaller(t *testing.T) {
+	api := newStubAPI(t, map[string]string{
+		"/users/me/dataTypes/steps/dataPoints:dailyRollUp": stepsDailyRollupResponse,
+	})
+	session := connect(t, api)
+
+	res := callTool(t, session, "query_data", map[string]any{
+		"data_type": "steps",
+		"operation": "daily-rollup",
+		"from":      "2026-03-22",
+		"to":        "2026-03-22",
+	})
+	if res.IsError {
+		t.Fatalf("tool reported an error: %s", text(t, res))
+	}
+
+	var payload struct {
+		Hints []string `json:"_hints"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &payload); err != nil {
+		t.Fatalf("result is not JSON: %v\n%s", err, text(t, res))
+	}
+	if len(payload.Hints) == 0 {
+		t.Fatalf("a one-day rollup produced no hint:\n%s", text(t, res))
+	}
+	for _, h := range payload.Hints {
+		if !strings.Contains(h, "query_data") {
+			t.Errorf("hint does not name a tool to call: %s", h)
+		}
+		for _, cli := range []string{"ghealth ", "--from", "--limit", "--page-token"} {
+			if strings.Contains(h, cli) {
+				t.Errorf("hint tells an MCP client to run CLI syntax %q: %s", cli, h)
+			}
+		}
+	}
+}
+
+// The API sends int64 measurements as quoted strings. By the time a result
+// reaches a client they must be JSON numbers, or every consumer has to know
+// which quoted values are really numbers before it can compare or total them.
+func TestEndToEndMeasurementsAreNumbers(t *testing.T) {
+	api := newStubAPI(t, map[string]string{
+		"/users/me/dataTypes/steps/dataPoints:dailyRollUp": stepsDailyRollupResponse,
+	})
+	session := connect(t, api)
+
+	res := callTool(t, session, "query_data", map[string]any{
+		"data_type": "steps",
+		"operation": "daily-rollup",
+		"from":      "2026-03-22",
+		"to":        "2026-03-23",
+	})
+	if res.IsError {
+		t.Fatalf("tool reported an error: %s", text(t, res))
+	}
+
+	var payload struct {
+		DataPoints []map[string]json.RawMessage `json:"dataPoints"`
+	}
+	if err := json.Unmarshal([]byte(text(t, res)), &payload); err != nil {
+		t.Fatalf("result is not JSON: %v\n%s", err, text(t, res))
+	}
+	if len(payload.DataPoints) != 1 {
+		t.Fatalf("got %d buckets, want 1:\n%s", len(payload.DataPoints), text(t, res))
+	}
+	// The stub answers with "countSum": "9037".
+	if got := string(payload.DataPoints[0]["countSum"]); got != "9037" {
+		t.Errorf("countSum came back as %s, want the unquoted number 9037", got)
+	}
+}
+
+// The real binary must satisfy its own declared output schema. The SDK validates
+// every result against it, so a drift between the schema and what the CLI prints
+// would surface here as a failing call rather than in production.
+func TestEndToEndResultsCarryValidatedStructuredContent(t *testing.T) {
+	api := newStubAPI(t, map[string]string{
+		"/users/me/dataTypes/steps/dataPoints": stepsListResponse,
+	})
+	session := connect(t, api)
+
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"query_data", map[string]any{"data_type": "steps", "operation": "list", "from": "2026-03-22", "to": "2026-03-23"}},
+		{"list_data_types", map[string]any{}},
+		{"describe_data_type", map[string]any{"data_type": "steps"}},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			res := callTool(t, session, tc.tool, tc.args)
+			if res.IsError {
+				t.Fatalf("tool reported an error: %s", text(t, res))
+			}
+			if res.StructuredContent == nil {
+				t.Fatal("no structured content, though the tool declares an output schema")
+			}
+			// One text block, holding exactly what the CLI printed.
+			if len(res.Content) != 1 {
+				t.Fatalf("got %d content blocks, want 1", len(res.Content))
+			}
+			if !json.Valid([]byte(text(t, res))) {
+				t.Errorf("text block is not JSON:\n%s", text(t, res))
+			}
+		})
+	}
+}

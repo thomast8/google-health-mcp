@@ -8,12 +8,15 @@ The CLI handles OAuth, pagination, response simplification, and contextual hints
 
 ## The MCP server is a wrapper, not a second implementation
 
-`pkg/mcpserver` runs the CLI as a child process and returns its stdout unchanged. That is deliberate: filter construction, pagination, rollup range caps, simplification, `_hints` and the error envelope have one home, and an MCP tool result is byte-for-byte what the equivalent CLI command prints. It is also what makes concurrent tool calls safe, since the cobra tree keeps flag state in package-level variables and writes to `os.Stdout`.
+`pkg/mcpserver` runs the CLI as a child process and returns its stdout unchanged. That is deliberate: filter construction, pagination, rollup range caps, simplification, `_hints` and the error envelope have one home, and an MCP tool result's text block is byte-for-byte what the equivalent CLI command prints. It is also what makes concurrent tool calls safe, since the cobra tree keeps flag state in package-level variables and writes to `os.Stdout`.
 
 Consequences to respect when changing things:
 
 - Improve behaviour in `cmd/` or `pkg/output` and both surfaces get it. Never reimplement CLI logic inside `pkg/mcpserver`.
 - A tool handler's only jobs are validating input against the registry and building argv. Flags are gated by operation so the child never receives a flag its subcommand has not registered.
+- Tools that answer in JSON return the same bytes twice: as the text block, and as `structuredContent` validated against the tool's declared output schema (`pkg/mcpserver/schemas.go`). Set the text block explicitly — left to itself the SDK fills it in from the structured value, which has been through a map and comes back alphabetised, and the byte-for-byte property is gone. Change what the CLI prints and the schemas have to keep up; `TestEndToEndResultsCarryValidatedStructuredContent` is what tells you they have not.
+- The output schemas stay permissive: nothing required, additional properties allowed. `raw: true` returns the untouched API response, and a schema that rejected it would turn a working read into a validation error. Their job is to name and explain the fields an agent will meet, not to police them.
+- Hints are surface-aware. The suggestion is shared; the phrasing is not. A hint has to name a step its reader can take, and an MCP client has no shell to run `ghealth data ... --detail` in, so `pkg/output/hints.go` renders each hint as a command line for `SurfaceCLI` and as a tool call for `SurfaceMCP`. The MCP server sets `GHEALTH_SURFACE=mcp` on its children — in both auth modes — and nothing else sets it. Add a hint and you add both phrasings; the MCP one is asserted to contain no CLI syntax.
 - The MCP surface is read-only, and stays that way. It is built to be reachable over the network, where the blast radius of a bad call is someone's health record.
 - HTTP mode fails closed without `GHEALTH_MCP_TOKEN`. Do not add a way to serve unauthenticated.
 - Renaming a CLI flag or subcommand breaks the MCP layer silently — the argv is only checked at runtime. `pkg/mcpserver`'s tests assert the exact argv, and the end-to-end tests drive the real binary against a stub API; run them after any change to `cmd/`.
@@ -42,7 +45,7 @@ Information is layered so agents load only what they need:
 4. `ghealth data <type> <op> --help` → flags for that operation
 5. `ghealth schema types` → machine-readable type registry
 6. `ghealth schema type <name>` → fields, parameters, scope for one type
-7. `_hints` in responses → contextual next-step suggestions
+7. `_hints` in responses → contextual next-step suggestions, phrased for the surface that will read them
 8. `skills/ghealth/SKILL.md` → non-obvious patterns, gotchas (load once)
 
 ## Build
@@ -76,10 +79,11 @@ GHEALTH_MCP_TOKEN=$(openssl rand -hex 32) ghealth mcp --http   # then curl /heal
 |------|-----------|
 | Add/remove a data type | `pkg/types/registry.go` |
 | Change response format | `pkg/output/simplify.go` |
-| Add a contextual hint | `pkg/output/hints.go` |
+| Add a contextual hint (both surfaces) | `pkg/output/hints.go` |
 | Change CLI flags or help text | `cmd/root.go` (globals), `cmd/data.go` (operations) |
 | OAuth or auth flow | `pkg/auth/auth.go` |
 | Add/change an MCP tool | `pkg/mcpserver/tools.go` |
+| Change an MCP output schema | `pkg/mcpserver/schemas.go` |
 | MCP transports, auth mode wiring, health check | `pkg/mcpserver/server.go` |
 | Per-caller credential isolation | `pkg/mcpserver/exec.go` |
 | OAuth endpoints, consent screen, PKCE | `pkg/mcpauth/provider.go` |
@@ -95,7 +99,9 @@ GHEALTH_MCP_TOKEN=$(openssl rand -hex 32) ghealth mcp --http   # then curl /heal
 |-------------|--------|
 | Add/remove a data type | `README.md` types table, `skills/ghealth/SKILL.md` |
 | Change flags or commands | `README.md`, `skills/ghealth-shared/SKILL.md` |
-| Add/change an MCP tool | `README.md` MCP tools table, the tool's own description string |
+| Add/change an MCP tool | `README.md` MCP tools table, the tool's own description string, its output schema in `pkg/mcpserver/schemas.go` |
+| Change what the CLI prints for a read | `pkg/mcpserver/schemas.go`, `README.md` Output section, `skills/ghealth/SKILL.md` |
+| Add or reword a hint | both surface phrasings in `pkg/output/hints.go` |
 | Add an MCP environment variable | `README.md` MCP environment variables table, `cmd/mcp.go` help text |
 | Change the OAuth flow or its guarantees | `README.md` Security notes, the multi-user rules above |
 

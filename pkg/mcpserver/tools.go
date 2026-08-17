@@ -51,6 +51,19 @@ var userResources = map[string][]string{
 	"paired-devices": {"user", "paired-devices", "list"},
 }
 
+// readAnnotations describe every tool this server exposes: each one reads, none
+// of them writes, all of them reach Google's servers rather than answering from a
+// closed world of the client's own state, and repeating any of them changes
+// nothing — so a client is free to retry a call it did not get an answer to.
+func readAnnotations() *mcp.ToolAnnotations {
+	openWorld := true
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:   true,
+		IdempotentHint: true,
+		OpenWorldHint:  &openWorld,
+	}
+}
+
 // AddTools registers every tool on the server. Handlers translate arguments
 // into a ghealth command line and hand back its stdout unchanged, so a tool
 // result is exactly what the equivalent CLI command prints — including the
@@ -60,65 +73,109 @@ func AddTools(s *mcp.Server, r Runner) {
 		Name:  "list_data_types",
 		Title: "List health data types",
 		Description: "List the Google Health data types this server can read, with the " +
-			"operations each one supports. Start here when you do not already know the " +
-			"type ID for a health question. Optionally filter by category.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+			"operations each one supports.\n\n" +
+			"Start here whenever you do not already know the type ID for a health question: " +
+			"IDs are hyphenated and not always guessable ('heart-rate', 'oxygen-saturation', " +
+			"'daily-resting-heart-rate'), and passing a wrong one costs a round trip. Filter by " +
+			"category to narrow a broad question — 'activity_and_fitness' for movement and " +
+			"exercise, 'sleep', 'nutrition', 'health_metrics_and_measurements' for vitals and " +
+			"body measurements. Answers from a local registry, so it costs no API call.",
+		Annotations:  readAnnotations(),
+		OutputSchema: listDataTypesOutputSchema,
 	}, listDataTypes)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "describe_data_type",
 		Title: "Describe a health data type",
-		Description: "Show the fields, operation parameters, filter template and OAuth scope " +
-			"for one data type. Call this before query_data when you need to know which " +
-			"fields a type returns or which parameters an operation accepts.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Description: "Show the fields one data type returns, the parameters each of its " +
+			"operations takes, its filter template and the OAuth scope it needs.\n\n" +
+			"Call this between list_data_types and query_data when the answer depends on knowing " +
+			"the data rather than just fetching it: which field carries the measurement you want " +
+			"and in what unit, whether the type supports rollup at all, or what a filter " +
+			"expression for it has to look like. Skip it for a straightforward read of a " +
+			"familiar type. Also the way to find the scope to check against auth_status when a " +
+			"query fails with a permission error.",
+		Annotations:  readAnnotations(),
+		OutputSchema: describeDataTypeOutputSchema,
 	}, describeDataType(r))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "query_data",
 		Title: "Query health data",
-		Description: "Read health data for one type. Operations: 'list' returns individual " +
-			"data points; 'rollup' aggregates into fixed windows; 'daily-rollup' aggregates " +
-			"per day and is the right choice for daily totals such as steps; 'get' fetches one " +
-			"data point by id; 'reconcile' reports what changed. Prefer daily-rollup over " +
-			"summing a list yourself. Responses are simplified JSON and may carry a '_hints' " +
-			"array suggesting the next call, plus 'nextPageToken' when more data is available.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Description: "Read health data of one type over one date range. This is the tool that " +
+			"answers health questions; the others exist to tell you how to call it.\n\n" +
+			"Pick the operation by the question, not by habit:\n" +
+			"• 'daily-rollup' — daily totals and averages ('how many steps yesterday', 'resting " +
+			"heart rate this month'). Use it instead of listing points and adding them up: it " +
+			"aggregates in the user's local days, which a sum over UTC timestamps gets wrong " +
+			"around midnight, and it returns days instead of thousands of rows.\n" +
+			"• 'list' — individual readings, when timestamps or per-point detail matter ('when " +
+			"did I run today', 'my heart rate during that workout'). Auto-paginates.\n" +
+			"• 'rollup' — fixed windows other than a day, set by window_size ('steps per hour').\n" +
+			"• 'get' — one data point by id, from a previous list.\n" +
+			"• 'reconcile' — which points changed, for syncing a local copy.\n\n" +
+			"from/to accept YYYY-MM-DD, a full ISO 8601 timestamp, or 'today'/'yesterday', and " +
+			"'to' includes the day it names. Both are required for the rollup operations, which " +
+			"the API caps at 90 days per call (14 for heart-rate, total-calories, active-minutes " +
+			"and calories-in-heart-rate-zone) — split a longer question into several calls.\n\n" +
+			"Days with no recorded data are absent from the result, not zero. An empty " +
+			"dataPoints array means nothing was recorded, or the range predates the user's " +
+			"device — it does not mean the request was wrong.",
+		Annotations:  readAnnotations(),
+		OutputSchema: queryDataOutputSchema,
 	}, queryData(r))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "get_user_info",
 		Title: "Get user profile and devices",
-		Description: "Read account-level information: the user's identity, profile " +
-			"(height, birthdate, sex), app settings, irregular-rhythm-notification profile, " +
-			"or the list of paired devices.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Description: "Read account-level information rather than measurements: the user's " +
+			"identity, their profile (height, date of birth, sex), their Health app settings, " +
+			"their irregular-rhythm-notification profile, or the devices paired with the " +
+			"account.\n\n" +
+			"Reach for it when a health answer needs context the measurements do not carry — " +
+			"height to interpret a weight, age for heart-rate zones, or which watch was " +
+			"recording. Also the way to answer 'which device did this come from' when a data " +
+			"point's 'source' field is not specific enough.",
+		Annotations:  readAnnotations(),
+		OutputSchema: getUserInfoOutputSchema,
 	}, getUserInfo(r))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "auth_status",
 		Title: "Check authentication status",
-		Description: "Report which credentials the server is using, the authenticated account, " +
-			"the granted OAuth scopes and the token expiry. Call this first when a data query " +
-			"fails with an authentication or permission error.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Description: "Report which credentials this server is using, which Google account they " +
+			"belong to, the OAuth scopes granted and when the access token expires.\n\n" +
+			"Call it when a query fails with an authentication or permission error: the usual " +
+			"cause is a scope that was never granted, and comparing the scopes listed here " +
+			"against the one describe_data_type reports for the type says so definitively. Also " +
+			"answers 'whose data am I reading?', which matters on a deployment several people " +
+			"share. Not a health query — do not call it before an ordinary read.",
+		Annotations:  readAnnotations(),
+		OutputSchema: authStatusOutputSchema,
 	}, authStatus(r))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "export_exercise_tcx",
 		Title: "Export an exercise track",
-		Description: "Export one exercise session's GPS/sensor track, either as raw TCX XML or " +
-			"as a trackpoint CSV (time, lap, position, altitude, distance, heart rate). Find the " +
-			"exercise id first with query_data on data_type 'exercise'. Indoor sessions with no " +
-			"track return a header-only CSV — their summary is in the exercise data point itself.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Description: "Export one exercise session's recorded track: the second-by-second " +
+			"trackpoints behind a workout, as CSV (time, lap, latitude, longitude, altitude, " +
+			"distance, heart rate) or as the raw TCX XML Google returns.\n\n" +
+			"Use it for questions about what happened *during* a session — pace over distance, " +
+			"the route taken, how heart rate moved across it. For a session's totals, the " +
+			"exercise data point from query_data already has them, and is far cheaper.\n\n" +
+			"Needs an exercise id: call query_data with data_type 'exercise' and operation " +
+			"'list' first, and take 'id' from the session you want. Indoor sessions have no " +
+			"track and return a header-only CSV.\n\n" +
+			"Returns text — CSV rows or XML — not JSON, and one outdoor session can run to " +
+			"thousands of rows.",
+		Annotations: readAnnotations(),
 	}, exportExerciseTCX(r))
 }
 
 // ─── list_data_types ─────────────────────────────────────────────
 
 type listDataTypesInput struct {
-	Category string `json:"category,omitempty" jsonschema:"Only return types in this category, e.g. activity_and_fitness, sleep, nutrition, health_metrics_and_measurements. Omit to list every type."`
+	Category string `json:"category,omitempty" jsonschema:"Only return types in this category. Known categories: activity_and_fitness, sleep, nutrition, health_metrics_and_measurements. Omit to list every type, which is the right choice when you are not sure which category a question falls in."`
 }
 
 // listDataTypes answers from the in-process registry. The registry is the
@@ -156,7 +213,7 @@ func listDataTypes(_ context.Context, _ *mcp.CallToolRequest, in listDataTypesIn
 	if category != "" {
 		payload["category"] = category
 	}
-	return jsonResult(payload)
+	return localJSONResult(payload)
 }
 
 func allCategories() []string {
@@ -184,7 +241,7 @@ func knownCategory(c string) bool {
 // ─── describe_data_type ──────────────────────────────────────────
 
 type describeDataTypeInput struct {
-	DataType string `json:"data_type" jsonschema:"The data type ID, e.g. steps, heart-rate, sleep, weight. Use list_data_types to discover valid IDs."`
+	DataType string `json:"data_type" jsonschema:"The data type ID to describe, e.g. steps, heart-rate, sleep, weight. IDs are hyphenated; list_data_types is the authoritative list."`
 }
 
 func describeDataType(r Runner) mcp.ToolHandlerFor[describeDataTypeInput, any] {
@@ -197,25 +254,25 @@ func describeDataType(r Runner) mcp.ToolHandlerFor[describeDataTypeInput, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(out)
+		return jsonResult(out)
 	}
 }
 
 // ─── query_data ──────────────────────────────────────────────────
 
 type queryDataInput struct {
-	DataType   string `json:"data_type" jsonschema:"The data type ID, e.g. steps, heart-rate, sleep, weight. Use list_data_types to discover valid IDs."`
-	Operation  string `json:"operation" jsonschema:"One of list, get, rollup, daily-rollup, reconcile. Must be an operation the type supports — list_data_types reports which."`
-	From       string `json:"from,omitempty" jsonschema:"Start of the range: YYYY-MM-DD, an ISO 8601 timestamp, 'today' or 'yesterday'. Required for rollup and daily-rollup."`
-	To         string `json:"to,omitempty" jsonschema:"End of the range, inclusive of the named day: YYYY-MM-DD, an ISO 8601 timestamp, 'today' or 'yesterday'. Required for rollup and daily-rollup."`
-	Limit      int    `json:"limit,omitempty" jsonschema:"list only: maximum data points to return across all pages. Defaults to 500."`
-	PageToken  string `json:"page_token,omitempty" jsonschema:"list only: resume from a previous response's nextPageToken to fetch the following page."`
-	Filter     string `json:"filter,omitempty" jsonschema:"list and reconcile only: a raw API filter expression, which overrides from/to. Use describe_data_type for the filter template."`
-	WindowSize string `json:"window_size,omitempty" jsonschema:"rollup only: aggregation window as a duration, e.g. 3600s or 86400s. Defaults to 86400s."`
-	WindowDays int    `json:"window_days,omitempty" jsonschema:"daily-rollup only: aggregation window in days. Defaults to 1."`
-	ID         string `json:"id,omitempty" jsonschema:"get only: the data point ID to fetch. Required for get."`
-	Detail     bool   `json:"detail,omitempty" jsonschema:"sleep list only: include the per-stage time breakdown."`
-	Raw        bool   `json:"raw,omitempty" jsonschema:"Return the original API response instead of the simplified one. Use when you need a field the simplified shape drops."`
+	DataType   string `json:"data_type" jsonschema:"The data type to read, e.g. steps, heart-rate, sleep, weight. IDs are hyphenated; list_data_types is the authoritative list."`
+	Operation  string `json:"operation" jsonschema:"How to read it. 'daily-rollup' for daily totals and averages (the right choice for 'how many steps yesterday'); 'list' for individual timestamped readings; 'rollup' for fixed windows other than a day; 'get' for one point by id; 'reconcile' for what changed since a sync. Must be an operation the type supports — list_data_types reports which."`
+	From       string `json:"from,omitempty" jsonschema:"Start of the range: YYYY-MM-DD, a full ISO 8601 timestamp, 'today' or 'yesterday'. Required for rollup and daily-rollup, optional for list and reconcile."`
+	To         string `json:"to,omitempty" jsonschema:"End of the range, including the whole day it names: YYYY-MM-DD, a full ISO 8601 timestamp, 'today' or 'yesterday'. Required for rollup and daily-rollup. Use the same value as 'from' for a single day."`
+	Limit      int    `json:"limit,omitempty" jsonschema:"list only: how many data points to return in total, across as many pages as it takes. Defaults to 500. Sampled types run to thousands of points a day, so leave this low unless you need every reading."`
+	PageToken  string `json:"page_token,omitempty" jsonschema:"list only: continue a previous read by passing back its response's nextPageToken, keeping every other argument the same."`
+	Filter     string `json:"filter,omitempty" jsonschema:"list and reconcile only: a raw Health API filter expression, which replaces from/to entirely. Only needed for bounds from/to cannot express, such as an exact sub-day window; call describe_data_type for this type's filter template, since field names are snake_case and differ from the type ID."`
+	WindowSize string `json:"window_size,omitempty" jsonschema:"rollup only: the aggregation window as a duration string, e.g. '3600s' for hourly. Defaults to 86400s (a day), but prefer the daily-rollup operation for whole days — it aggregates in the user's local days rather than fixed 24-hour blocks."`
+	WindowDays int    `json:"window_days,omitempty" jsonschema:"daily-rollup only: how many days each aggregation window covers. Defaults to 1. Set it to 7 for weekly totals; windows wider than a day report startDate and endDate instead of date."`
+	ID         string `json:"id,omitempty" jsonschema:"get only, and required there: the data point id to fetch, taken from the 'id' field of a previous list result."`
+	Detail     bool   `json:"detail,omitempty" jsonschema:"sleep list only: also return the per-stage breakdown, with a timestamped entry for every AWAKE, LIGHT, DEEP and REM stage. The per-night summary is included either way."`
+	Raw        bool   `json:"raw,omitempty" jsonschema:"Return the untouched Health API response instead of the simplified one, with no _hints and no normalised envelope. Only worth setting when you need a field simplification drops; the simplified shape is smaller and easier to read."`
 }
 
 func queryData(r Runner) mcp.ToolHandlerFor[queryDataInput, any] {
@@ -228,7 +285,7 @@ func queryData(r Runner) mcp.ToolHandlerFor[queryDataInput, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(out)
+		return jsonResult(out)
 	}
 }
 
@@ -322,7 +379,7 @@ func requireRange(from, to, id, op string) error {
 // ─── get_user_info ───────────────────────────────────────────────
 
 type getUserInfoInput struct {
-	Resource string `json:"resource" jsonschema:"One of identity, profile, settings, irn-profile, paired-devices."`
+	Resource string `json:"resource" jsonschema:"Which account resource to read. 'identity' for who the account is; 'profile' for height, date of birth and sex; 'settings' for Health app settings; 'irn-profile' for irregular-rhythm-notification state; 'paired-devices' for the devices linked to the account."`
 }
 
 func getUserInfo(r Runner) mcp.ToolHandlerFor[getUserInfoInput, any] {
@@ -336,7 +393,7 @@ func getUserInfo(r Runner) mcp.ToolHandlerFor[getUserInfoInput, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(out)
+		return jsonResult(out)
 	}
 }
 
@@ -350,7 +407,7 @@ func authStatus(r Runner) mcp.ToolHandlerFor[authStatusInput, any] {
 		if err != nil {
 			return nil, nil, err
 		}
-		return textResult(withConnectedAccount(ctx, out))
+		return jsonResult(withConnectedAccount(ctx, out))
 	}
 }
 
@@ -381,8 +438,8 @@ func withConnectedAccount(ctx context.Context, out []byte) []byte {
 // ─── export_exercise_tcx ─────────────────────────────────────────
 
 type exportExerciseTCXInput struct {
-	ID string `json:"id" jsonschema:"The exercise data point ID. Find it with query_data on data_type 'exercise'."`
-	As string `json:"as,omitempty" jsonschema:"Output format: 'csv' for one row per trackpoint (default), or 'tcx' for the raw TCX XML Google returns."`
+	ID string `json:"id" jsonschema:"The exercise session's data point id, taken from the 'id' field of a query_data list on data_type 'exercise'."`
+	As string `json:"as,omitempty" jsonschema:"Output format: 'csv' for one row per trackpoint (the default, and far cheaper to read), or 'tcx' for the raw TCX XML Google returns."`
 }
 
 func exportExerciseTCX(r Runner) mcp.ToolHandlerFor[exportExerciseTCXInput, any] {
@@ -479,19 +536,42 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// textResult returns CLI stdout to the client unchanged.
+// textResult returns CLI stdout to the client unchanged, with no structured
+// content. It is for the tools whose output is not JSON.
 func textResult(out []byte) (*mcp.CallToolResult, any, error) {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
 	}, nil, nil
 }
 
-// jsonResult renders a locally built payload in the same indented JSON the CLI
-// emits, so every tool's output reads the same way.
-func jsonResult(payload any) (*mcp.CallToolResult, any, error) {
+// jsonResult returns a JSON tool result twice over: as the text block, byte for
+// byte what the CLI printed, and as structured content the SDK validates against
+// the tool's declared output schema.
+//
+// Setting the text block explicitly is what keeps the CLI's own bytes — its key
+// order and its indentation — in front of the caller. Left to itself the SDK
+// would fill the block in from the structured value, which has been through a
+// map and comes back alphabetised.
+//
+// Output that does not parse as JSON is still returned, just without structured
+// content. A `--format json` command printing something else is a bug, and
+// failing the call outright would hide the evidence of it.
+func jsonResult(out []byte) (*mcp.CallToolResult, any, error) {
+	res := &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
+	}
+	if !json.Valid(out) {
+		return res, nil, nil
+	}
+	return res, json.RawMessage(out), nil
+}
+
+// localJSONResult renders a payload this server built itself in the same
+// indented JSON the CLI emits, so every tool's output reads the same way.
+func localJSONResult(payload any) (*mcp.CallToolResult, any, error) {
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to encode result: %w", err)
 	}
-	return textResult(data)
+	return jsonResult(data)
 }

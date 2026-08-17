@@ -158,8 +158,8 @@ Write operations use `create`, `update --id <id> [--update-mask fields]`, `delet
 
 ## Gotchas
 
-- **Missing days are NOT zeros** (`altitude`, `distance`, `floors`, `steps`, `total-calories`): a date absent from rollup output means the device wasn't worn / didn't sync — NOT zero. `countSum: "0"` is a true zero (worn, no activity). Never coalesce missing buckets to 0 or average over absent days as zeros — that silently deflates weekly/monthly stats
-- String vs number values follow protobuf JSON encoding: `int64` fields (`beatsPerMinute`, `countSum`, `minutesAsleep`) are **strings**; `int32`/`double` fields (`weightGrams`, `caloriesKcal`, `percentage`) are **numbers**
+- **Missing days are NOT zeros** (`altitude`, `distance`, `floors`, `steps`, `total-calories`): a date absent from rollup output means the device wasn't worn / didn't sync — NOT zero. `countSum: 0` is a true zero (worn, no activity). Never coalesce missing buckets to 0 or average over absent days as zeros — that silently deflates weekly/monthly stats
+- Measurements are **numbers** in simplified output. The API sends `int64` fields (`beatsPerMinute`, `countSum`, `minutesAsleep`) as quoted strings per protobuf JSON encoding; simplification converts them, so you never have to guess which quoted values are numeric. Two exceptions: `--raw` output keeps the API's own string typing, and a value that would not reproduce its original text as a number (`"007"`, `"1.50"`) stays a string. Identifiers (`id`, and anything ending in `Id`/`Name`/`Token`) are never converted, even when all-digit
 - `--filter` raw syntax: only `>=` and `<` comparators. Civil time fields (no `Z`): interval types use `{type}.interval.civil_start_time`, sleep uses `sleep.interval.civil_end_time` (only end-time is filterable), daily types use `{type}.date`. Physical time fields (with `Z`): sample types use `{type}.sample_time.physical_time`
 - Write operations are **asynchronous** — the API returns an Operation object, not the created/updated data. Use `list` to verify persistence
 - Body fat `delete` returns HTTP 500 — this is an API bug
