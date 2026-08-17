@@ -116,14 +116,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, format+"\n", a...)
 	}
 
-	written, err := mcpserver.BootstrapCredentials()
-	if err != nil {
-		return client.NewConfigError(err.Error(), "Check the credential environment variables against 'ghealth auth export' output")
-	}
-	for _, path := range written {
-		logf("wrote %s from the environment", path)
-	}
-
 	timeout, err := mcpTimeout()
 	if err != nil {
 		return client.NewValidationError(err.Error(), "Use a Go duration such as 60s or 3m")
@@ -135,6 +127,9 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// stdio serves whoever launched the process, using the credentials the CLI
 	// already has. There is no second party to authenticate.
 	if !mcpHTTP && !envEnabled(envMCPHTTP) {
+		if err := bootstrapOperatorCredentials(logf); err != nil {
+			return err
+		}
 		logf("ghealth mcp: serving over stdio (config dir: %s)", config.ConfigDir())
 		return mcpserver.ServeStdio(ctx, mcpserver.New(mcpserver.Options{
 			Runner:  &mcpserver.ExecRunner{Timeout: timeout},
@@ -145,6 +140,18 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	opts, err := httpAuthOptions(logf)
 	if err != nil {
 		return err
+	}
+
+	// The operator's own Google credentials are what a single-account
+	// deployment serves, so they are installed only in that mode. Under Google
+	// sign-in every caller brings their own, and writing a credential the
+	// server has no way to use would be storing a secret for nothing.
+	if opts.OAuth == nil {
+		if err := bootstrapOperatorCredentials(logf); err != nil {
+			return err
+		}
+	} else {
+		warnUnusedOperatorCredentials(logf)
 	}
 
 	runner := &mcpserver.ExecRunner{Timeout: timeout}
@@ -251,6 +258,35 @@ func httpAuthOptions(logf func(string, ...any)) (mcpserver.HTTPOptions, error) {
 		logf("ghealth mcp: Google sign-in enabled — set %s so the OAuth URLs do not depend on forwarded headers", envPublicURL)
 	}
 	return mcpserver.HTTPOptions{OAuth: provider}, nil
+}
+
+// bootstrapOperatorCredentials installs the server's own Google credentials
+// from the environment, for the modes that serve the operator's account.
+func bootstrapOperatorCredentials(logf func(string, ...any)) error {
+	written, err := mcpserver.BootstrapCredentials()
+	if err != nil {
+		return client.NewConfigError(err.Error(),
+			"Check the credential environment variables against 'ghealth auth export' output")
+	}
+	for _, path := range written {
+		logf("wrote %s from the environment", path)
+	}
+	return nil
+}
+
+// warnUnusedOperatorCredentials flags single-account credentials left set under
+// Google sign-in.
+//
+// They are inert here — a child process is given the caller's token and an empty
+// config directory, and these variables are stripped from its environment — but
+// an operator who has migrated from the shared-token mode should know they are
+// carrying a copy of their own refresh token that nothing reads.
+func warnUnusedOperatorCredentials(logf func(string, ...any)) {
+	for _, name := range []string{mcpserver.EnvClientSecret, mcpserver.EnvCredentials} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			logf("ghealth mcp: %s is set but unused under Google sign-in — every caller brings their own credentials; remove it", name)
+		}
+	}
 }
 
 // googleScopes parses GHEALTH_MCP_SCOPES, returning nil to mean "use the

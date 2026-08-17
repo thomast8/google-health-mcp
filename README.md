@@ -404,6 +404,14 @@ Each user signs in with their own Google account and sees only their own data. T
 their Google refresh token, mints its own short-lived tokens for the MCP client, and never passes
 the client's token upstream.
 
+**The Google client ID and secret identify the app, not a person.** They are how Google recognises
+"this is your MCP server asking", in the same way a mobile app ships one client ID and still shows
+each user their own account. Whose data a request reads is decided by the refresh token Google
+issues when *that user* signs in and consents — one per person, sealed into the access token their
+MCP client holds. So the shared client credentials serve everyone without anyone seeing anyone
+else's data, and the operator's own health record is not reachable through the deployment at all
+unless they sign in like any other user.
+
 Google cannot act as the MCP authorization server directly — MCP clients need Dynamic Client
 Registration (RFC 7591) and resource indicators (RFC 8707), and Google supports neither. So this
 server *is* the authorization server the client registers with, and federates to Google behind it:

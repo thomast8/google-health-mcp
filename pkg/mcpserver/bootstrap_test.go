@@ -199,3 +199,27 @@ func assertOwnerOnlyJSON(t *testing.T, path string) {
 		t.Errorf("%s has mode %o, want 600 — these are credentials", path, perm)
 	}
 }
+
+// Under Google sign-in every caller brings their own credentials, so the
+// operator's must not be installed — a copy of their refresh token on disk
+// would be a secret stored for nothing. The command decides this; this test
+// pins the behaviour BootstrapCredentials must have when it *is* called, namely
+// that it is the only thing that writes them.
+func TestBootstrapIsTheOnlyWriterOfOperatorCredentials(t *testing.T) {
+	dir := isolateConfigDir(t)
+	t.Setenv(EnvClientSecret, testClientSecret)
+	t.Setenv(EnvCredentials, testCredentials("rt"))
+
+	// Not called: nothing should exist yet.
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("config dir is not empty before the bootstrap runs: %v (%v)", entries, err)
+	}
+
+	if _, err := BootstrapCredentials(); err != nil {
+		t.Fatalf("BootstrapCredentials: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("expected both credential files after the bootstrap, got %v (%v)", entries, err)
+	}
+}
