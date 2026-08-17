@@ -424,44 +424,76 @@ through. That screen names the requesting client and where it will send the user
 what stops a client the user never chose from silently obtaining a code on their behalf — the
 confused-deputy mitigation the MCP spec requires.
 
-**1. Create a Google OAuth client.** It must be a **Web application** client — the Desktop client
+The Google OAuth client has to be told the exact URL Google will redirect back to, and that URL
+contains a domain that does not exist until the service is deployed. So deploy first, get the
+domain, then do the Google setup — not the other way round.
+
+**1. Deploy and get a domain.** `Dockerfile` and `railway.json` are included and set
+`GHEALTH_MCP_HTTP=1`.
+
+```bash
+railway init
+railway variables --set "GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)"   # temporary, replaced in step 3
+railway up
+railway domain          # prints the generated <name>.up.railway.app
+```
+
+The temporary token exists only so the first deploy boots and its health check passes — the server
+refuses to start with no authentication configured at all, and a crash-looping service is a
+confusing thing to debug a domain out of. `railway up` never exposes a service publicly on its own;
+`railway domain` is what creates the URL (or add a custom one with `railway domain example.com`).
+The generated domain is stable, so it is safe to register with Google.
+
+Confirm it is live before going further:
+
+```bash
+curl https://<your-domain>/healthz          # → {"status":"ok"}
+```
+
+**2. Create the Google OAuth client.** It must be a **Web application** client — the Desktop client
 `ghealth setup` creates cannot receive a server-side redirect.
 
 - Open [Google Cloud credentials](https://console.cloud.google.com/apis/credentials)
 - Enable the [Google Health API](https://console.cloud.google.com/apis/api/health.googleapis.com)
 - *Create credentials → OAuth client ID → Web application*
-- Under **Authorized redirect URIs** add `https://<your-domain>/oauth/callback` — exactly, no
-  trailing slash. The server prints this URI on startup, so you can copy it from the logs.
+- Under **Authorized redirect URIs** add `https://<your-domain>/oauth/callback` — the domain from
+  step 1, exactly, with no trailing slash
 - On the OAuth consent screen, add the Health read scopes your users need
 
-**2. Deploy.** `Dockerfile` and `railway.json` are included and set `GHEALTH_MCP_HTTP=1`.
+Copy the client ID and client secret.
+
+**3. Switch on Google sign-in.**
 
 ```bash
-railway init
 railway variables \
   --set "GHEALTH_MCP_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com" \
   --set "GHEALTH_MCP_GOOGLE_CLIENT_SECRET=<client-secret>" \
-  --set "GHEALTH_MCP_SECRET=$(openssl rand -hex 32)"
-railway up                    # then: Settings → Networking → Generate Domain
-railway variables --set "GHEALTH_MCP_PUBLIC_URL=https://<your-domain>"
+  --set "GHEALTH_MCP_SECRET=$(openssl rand -hex 32)" \
+  --set "GHEALTH_MCP_PUBLIC_URL=https://<your-domain>"
 ```
 
+Then drop the temporary token — `railway variable delete GHEALTH_MCP_TOKEN`, or remove it under
+*Variables* in the dashboard. Google sign-in takes precedence over the shared token, so it stops
+having any effect the moment the three Google variables are set; deleting it is tidiness, not a
+step the flow depends on.
+
 `GHEALTH_MCP_SECRET` seals every credential the server issues. **Keep it stable** — changing it
-signs everyone out, which is also how you revoke access in a hurry. `GHEALTH_MCP_PUBLIC_URL` is set
-after the domain exists; without it the server derives its URLs from forwarded headers, which works
-but is worth pinning. On Railway, `RAILWAY_PUBLIC_DOMAIN` is used as a fallback.
+signs everyone out, which is also how you revoke access in a hurry. Without
+`GHEALTH_MCP_PUBLIC_URL` the server derives its URLs from forwarded headers, which works but is
+worth pinning; on Railway, `RAILWAY_PUBLIC_DOMAIN` is the fallback.
 
 No database and no volume are needed in this mode: client IDs, authorization codes and tokens are
 all self-contained encrypted blobs, so the server keeps working across redeploys.
 
-Verify the deployment before wiring up a client:
+Check the discovery document, and that the redirect URI it reports is the one you registered — the
+server logs it on startup too:
 
 ```bash
-curl https://<your-domain>/healthz
-curl https://<your-domain>/.well-known/oauth-protected-resource
+curl https://<your-domain>/.well-known/oauth-authorization-server
+railway logs | grep "redirect URI"
 ```
 
-**3. Before other people can use it: Google verification.** Health scopes are *sensitive*, so
+**4. Before other people can use it: Google verification.** Health scopes are *sensitive*, so
 Google gates them. While your OAuth app's publishing status is **Testing**, only accounts you add
 as test users can sign in, and there is a hard cap of 100 users. Going to **Production** requires
 submitting the app for [sensitive scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification);
@@ -472,7 +504,8 @@ more than a hundred people you know.
 ### Shared token (single account)
 
 Every caller presenting the token reads the one Google account the server itself is authenticated
-as. Suitable for a private deployment; not for sharing.
+as. Suitable for a private deployment; not for sharing. Deploying is step 1 above — `railway init`,
+`railway up`, `railway domain` — and this mode needs no Google OAuth client of its own.
 
 ```bash
 export GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)
