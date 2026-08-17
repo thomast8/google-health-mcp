@@ -36,6 +36,10 @@ ENV GHEALTH_MCP_HTTP=1 \
     HOST=0.0.0.0 \
     PORT=8000
 
+# Documentation for humans and for `docker run -P`. Some hosts — Railway among them — ignore EXPOSE
+# and ask for a target port when you create a domain: answer 8000, or whatever PORT is set to. The
+# server binds $PORT, so a host that injects its own value overrides the default above; the port it
+# actually bound is printed on startup.
 EXPOSE 8000
 
 # GHEALTH_MCP_HTTP=1 selects the Streamable HTTP transport, binding HOST:PORT and serving the MCP

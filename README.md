@@ -484,7 +484,11 @@ repo*, authorise GitHub, pick the repo. If the code is on a branch rather than t
 it under *Service → Settings → Source → Branch* and redeploy. Railway builds the `Dockerfile`
 because `railway.json` names it explicitly, so there is nothing to configure about the build.
 
-**Domain.** *Service → Settings → Networking → Generate Domain*.
+**Domain.** *Service → Settings → Networking → Generate Domain*. It asks for a target port:
+answer **8000**. Railway does not read `EXPOSE` from a Dockerfile, which is why it has to ask. Add
+`PORT=8000` as a service variable too, so a host-injected default cannot differ from what you
+answered here — a mismatch shows up as a 502 with nothing in the logs to explain it. The port the
+server actually bound is printed on startup.
 
 **Variables.** *Service → Variables → New Variable*, one per row.
 
@@ -517,7 +521,9 @@ Once it exists it works in the iOS app on the same account.
 
 ```bash
 railway init
-railway variables --set "GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)"   # temporary, replaced in step 3
+railway variables \
+  --set "GHEALTH_MCP_TOKEN=$(openssl rand -hex 32)" \
+  --set "PORT=8000"                                 # pin the port the domain will forward to
 railway up
 railway domain          # prints the generated <name>.up.railway.app
 ```
@@ -527,6 +533,15 @@ refuses to start with no authentication configured at all, and a crash-looping s
 confusing thing to debug a domain out of. `railway up` never exposes a service publicly on its own;
 `railway domain` is what creates the URL (or add a custom one with `railway domain example.com`).
 The generated domain is stable, so it is safe to register with Google.
+
+If you are asked for a **target port**, answer `8000` — Railway ignores a Dockerfile's `EXPOSE`, so
+it cannot infer one. Setting `PORT=8000` explicitly, as above, keeps the port the server binds and
+the port the domain forwards to from drifting apart; when they differ you get a 502 and no log line
+explaining it. The startup log always states the address it bound:
+
+```
+ghealth mcp: serving Streamable HTTP on 0.0.0.0:8000/mcp (health: /healthz)
+```
 
 Confirm it is live before going further:
 
@@ -652,7 +667,7 @@ OAuth endpoints the same way. Requires a Pro/Max/Team/Enterprise plan.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `GHEALTH_MCP_HTTP` | `0` | `1` selects Streamable HTTP instead of stdio (same as `--http`). |
-| `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address for HTTP mode (container hosts set `PORT`). |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address for HTTP mode. A host that injects `PORT` overrides the default, so set it explicitly where the host also asks you for a target port. |
 | `GHEALTH_MCP_TIMEOUT` | `120s` | Per-tool-call timeout, as a Go duration. |
 | **Google sign-in** | | |
 | `GHEALTH_MCP_GOOGLE_CLIENT_ID` | — | Web OAuth client ID. |
