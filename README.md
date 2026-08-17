@@ -689,8 +689,20 @@ In shared-token mode instead, pick the API-key / bearer-token option and paste t
 
 ### Add it in Claude
 
-Settings → Connectors → *Add custom connector* → `https://<your-domain>/mcp`. Claude discovers the
-OAuth endpoints the same way. Requires a Pro/Max/Team/Enterprise plan.
+Requires a Pro, Max, Team or Enterprise plan. On Team or Enterprise an Owner adds it first under
+*Organization Settings → Connectors*, then members connect individually.
+
+1. [claude.ai/settings/connectors](https://claude.ai/settings/connectors) → *Add custom connector*
+2. URL: `https://<your-domain>/mcp`
+3. Leave the *Advanced settings* OAuth client ID and secret **blank** — those are for servers that
+   cannot self-register. This one supports Dynamic Client Registration, so Claude registers itself.
+
+**Nothing changes on the Google side.** Claude registers with this server, not with Google, and the
+one Google redirect URI (`/oauth/callback`) is already registered. The same is true in reverse:
+adding ChatGPT after Claude needs no reconfiguration either. Both clients are covered by tests.
+
+Claude connects from Anthropic's cloud, so the server has to be reachable from the public internet —
+it is, on any of the hosts above, but not if you are only running it on localhost.
 
 ### MCP environment variables
 

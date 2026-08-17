@@ -168,12 +168,19 @@ func (h *harness) register(t *testing.T, redirectURIs ...string) string {
 // code the client would receive.
 func (h *harness) authorize(t *testing.T, clientID, challenge string) string {
 	t.Helper()
+	return h.authorizeWith(t, clientID, challenge, testRedirectURI)
+}
+
+// authorizeWith is authorize for a client that registered a different redirect
+// URI — each real MCP client has its own.
+func (h *harness) authorizeWith(t *testing.T, clientID, challenge, redirectURI string) string {
+	t.Helper()
 	client := h.noRedirectClient()
 
 	q := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {clientID},
-		"redirect_uri":          {testRedirectURI},
+		"redirect_uri":          {redirectURI},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {"client-state"},
@@ -1028,5 +1035,84 @@ func TestDefaultScopesAreReadOnly(t *testing.T) {
 		if !strings.HasSuffix(s, ".readonly") {
 			t.Errorf("scope %q grants more than read access — the MCP surface is read-only", s)
 		}
+	}
+}
+
+// ─── the clients this server exists to serve ─────────────────────
+
+// The real redirect URIs ChatGPT and Claude register. Tightening redirect
+// validation is an easy way to break a connector with no other symptom than a
+// failed sign-in, so both are pinned here.
+const (
+	chatGPTRedirectURI = "https://chatgpt.com/connector_platform_oauth_redirect"
+	claudeRedirectURI  = "https://claude.ai/api/mcp/auth_callback"
+)
+
+func TestRealClientRedirectURIsAreAccepted(t *testing.T) {
+	for name, uri := range map[string]string{
+		"ChatGPT": chatGPTRedirectURI,
+		"Claude":  claudeRedirectURI,
+	} {
+		if err := validateRedirectURI(uri); err != nil {
+			t.Errorf("%s redirect URI %q rejected: %v", name, uri, err)
+		}
+	}
+}
+
+// Both clients must complete the flow unchanged. Claude and ChatGPT differ only
+// in the redirect URI they register — nothing about the Google side changes, so
+// adding one after the other needs no reconfiguration.
+func TestFullFlowForEachRealClient(t *testing.T) {
+	for name, redirectURI := range map[string]string{
+		"ChatGPT": chatGPTRedirectURI,
+		"Claude":  claudeRedirectURI,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			clientID := h.register(t, redirectURI)
+			code := h.authorizeWith(t, clientID, challengeFor(testVerifier), redirectURI)
+
+			resp, out := h.exchange(t, url.Values{
+				"grant_type":    {"authorization_code"},
+				"code":          {code},
+				"code_verifier": {testVerifier},
+				"redirect_uri":  {redirectURI},
+				"client_id":     {clientID},
+			})
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("token exchange failed: %d %v", resp.StatusCode, out)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, h.URL+"/mcp", nil)
+			req.Header.Set("Authorization", "Bearer "+out["access_token"].(string))
+			session, err := h.provider.Authenticate(req)
+			if err != nil {
+				t.Fatalf("the issued token does not authenticate: %v", err)
+			}
+			if session.Email == "" {
+				t.Error("the session names no account")
+			}
+		})
+	}
+}
+
+// Two clients connected to the same deployment must not be able to redeem each
+// other's codes, even though they federate through one Google client.
+func TestOneClientCannotRedeemAnothersCode(t *testing.T) {
+	h := newHarness(t)
+	chatGPT := h.register(t, chatGPTRedirectURI)
+	claude := h.register(t, claudeRedirectURI)
+
+	code := h.authorizeWith(t, chatGPT, challengeFor(testVerifier), chatGPTRedirectURI)
+
+	resp, out := h.exchange(t, url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {testVerifier},
+		"redirect_uri":  {claudeRedirectURI},
+		"client_id":     {claude},
+	})
+	if resp.StatusCode != http.StatusBadRequest || out["error"] != "invalid_grant" {
+		t.Fatalf("a code issued to one client was redeemable by another: %d %v", resp.StatusCode, out)
 	}
 }
