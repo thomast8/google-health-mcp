@@ -428,6 +428,51 @@ The Google OAuth client has to be told the exact URL Google will redirect back t
 contains a domain that does not exist until the service is deployed. So deploy first, get the
 domain, then do the Google setup — not the other way round.
 
+Nothing below needs Go or Docker locally: `railway up` uploads the directory and builds the
+Dockerfile remotely.
+
+<details>
+<summary><strong>Working in Google Cloud Shell, or any shell with no browser?</strong></summary>
+
+Two adjustments. First, install the CLI under `$HOME`, because Cloud Shell only persists your home
+directory — a CLI installed into `/usr/local` disappears when the VM is recycled:
+
+```bash
+npm config set prefix "$HOME/.npm-global"
+npm install -g @railway/cli
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
+export PATH="$HOME/.npm-global/bin:$PATH"
+railway --version
+```
+
+Second, `railway login` wants to open a browser it cannot reach. Use the device-code flow, which
+prints a URL and a short pairing code to open on any other device:
+
+```bash
+railway login --browserless
+```
+
+If that reports `Unauthorized` even after the web page says success — a
+[known CLI issue](https://station.railway.com/community/cli-login-loop-issue-railway-login-ra-2f09f81d)
+— fall back to an account token from [railway.com/account/tokens](https://railway.com/account/tokens):
+
+```bash
+read -rsp 'Railway API token: ' RAILWAY_API_TOKEN; echo; export RAILWAY_API_TOKEN
+railway whoami
+```
+
+`read -rsp` keeps the token out of your shell history. It lasts for the session only; re-export it
+after a Cloud Shell restart rather than writing it to `~/.bashrc`.
+
+Cloud Shell is already authenticated to gcloud, so enabling the API is one command:
+
+```bash
+gcloud config get-value project
+gcloud services enable health.googleapis.com
+```
+
+</details>
+
 **1. Deploy and get a domain.** `Dockerfile` and `railway.json` are included and set
 `GHEALTH_MCP_HTTP=1`.
 
